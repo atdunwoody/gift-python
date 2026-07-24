@@ -23,7 +23,7 @@ The package reproduces the two principal functions in the original R package:
 Activate the conda environment in which the package will be used:
 
 ```powershell
-conda activate REM
+conda activate gift
 ```
 
 From the extracted `gift-python` directory, install the package with plotting and spatial-network support:
