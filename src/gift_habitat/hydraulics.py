@@ -262,6 +262,7 @@ def avg_hydraulics(
     max_bankfull_depth: float | None = None,
     shape_factor: float | None = None,
     discharges: float | Iterable[float] | None = None,
+    full_curve: bool = False,
     output_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Simulate reach-averaged hydraulics below bankfull flow.
@@ -285,6 +286,11 @@ def avg_hydraulics(
         Optional positive discharge value or values in m3/s. The original
         GIFT discharge grid is used when omitted. Values outside the simulated
         subbankfull range are omitted.
+    full_curve
+        Return all native water-level simulations, including both discharge
+        endpoints, for integration over the entire modeled range. Cannot be
+        combined with ``discharges``. The default single-reach grid is
+        unchanged when this is False.
     output_dir
         Optional directory for ``channel_xs.csv`` and ``channel_xs.jpeg``.
 
@@ -295,6 +301,8 @@ def avg_hydraulics(
         (m2), wetted width ``Wi`` (m), mean depth ``di`` (m), and mean
         velocity ``Ui`` (m/s).
     """
+    if full_curve and discharges is not None:
+        raise ValueError("full_curve cannot be combined with discharges")
     slope = finite_scalar(slope, "slope", positive=True)
     bankfull_width = finite_scalar(
         bankfull_width,
@@ -357,22 +365,25 @@ def avg_hydraulics(
         d84_mm,
         resolved_shape_factor,
     )
-    target_discharges = _as_discharge_grid(discharges)
-
-    result = pd.DataFrame({"Q": target_discharges})
-    for column in ("Ai", "Wi", "di", "Ui"):
-        result[column] = _approx_like_r(
-            simulated["Q"].to_numpy(),
-            simulated[column].to_numpy(),
-            target_discharges,
-        )
-    result = result.dropna(subset=["Ai"]).reset_index(drop=True)
+    if full_curve:
+        result = simulated.sort_values("Q", kind="stable").reset_index(drop=True)
+    else:
+        target_discharges = _as_discharge_grid(discharges)
+        result = pd.DataFrame({"Q": target_discharges})
+        for column in ("Ai", "Wi", "di", "Ui"):
+            result[column] = _approx_like_r(
+                simulated["Q"].to_numpy(),
+                simulated[column].to_numpy(),
+                target_discharges,
+            )
+        result = result.dropna(subset=["Ai"]).reset_index(drop=True)
 
     max_depth = bankfull_depth / (1.0 - resolved_shape_factor)
     result.attrs.update(
         {
             "shape_factor": resolved_shape_factor,
             "simulated_max_depth_m": max_depth,
+            "simulated_min_discharge_m3s": float(simulated["Q"].min()),
             "simulated_bankfull_discharge_m3s": float(simulated["Q"].iloc[-1]),
         }
     )

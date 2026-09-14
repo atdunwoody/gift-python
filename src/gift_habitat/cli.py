@@ -16,12 +16,30 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Apply the GIFT hydraulic-habitat model to each feature in a "
-            "stream-network file and write a long CSV of WUA results."
+            "stream-network file. Write one WUA summary row per segment "
+            "to CSV and an attributed GeoPackage."
         )
     )
     parser.add_argument("network", type=Path, help="Input spatial file")
-    parser.add_argument("output_csv", type=Path, help="Output long-format CSV")
+    parser.add_argument("output_csv", type=Path, help="Output per-segment summary CSV")
     parser.add_argument("--layer", help="Input layer name when needed")
+    parser.add_argument(
+        "--output-network", type=Path,
+        help="Output GeoPackage; defaults to output_csv with a .gpkg extension",
+    )
+    parser.add_argument("--output-layer", default="gift_wua")
+    parser.add_argument(
+        "--flow-cols", nargs="+",
+        help="Biologically relevant flow fields to evaluate and summarize by median WUA",
+    )
+    parser.add_argument(
+        "--flow-units", choices=("cfs", "m3/s"),
+        help="Units for all --flow-cols; required when those fields are selected",
+    )
+    parser.add_argument(
+        "--curves-csv", type=Path,
+        help="Optional long CSV; defaults to the full native curves used for WUA_auc",
+    )
     parser.add_argument("--id-col", default="segment_uid")
     parser.add_argument("--slope-col", default="slope")
     parser.add_argument("--width-col", default="bankfull_width_m")
@@ -31,13 +49,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--shape-factor-col")
     parser.add_argument(
         "--discharge-col",
-        help="Evaluate each reach at the discharge stored in this field",
+        help="For --curves-csv only: evaluate each reach at this field's flow (m3/s)",
     )
     parser.add_argument(
         "--q-values",
         nargs="+",
         type=float,
-        help="Common discharge values in m3/s; omit for the GIFT grid",
+        help="For --curves-csv only: common discharge values in m3/s",
     )
     parser.add_argument("--depth-curve", type=Path)
     parser.add_argument("--velocity-curve", type=Path)
@@ -74,6 +92,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.discharge_col is not None and args.q_values is not None:
         raise SystemExit("Use either --discharge-col or --q-values, not both")
+    if args.flow_cols and args.flow_units is None:
+        raise SystemExit("--flow-cols requires --flow-units cfs or --flow-units m3/s")
+    if args.flow_units is not None and not args.flow_cols:
+        raise SystemExit("--flow-units requires --flow-cols")
+    has_selected_q = args.discharge_col is not None or args.q_values is not None
+    if has_selected_q and args.curves_csv is None:
+        raise SystemExit(
+            "--discharge-col and --q-values require --curves-csv. "
+            "For median WUA on the network use --flow-cols and --flow-units."
+        )
+    output_network = args.output_network or args.output_csv.with_suffix(".gpkg")
+    if output_network.suffix.lower() != ".gpkg":
+        raise SystemExit("--output-network must be a .gpkg file to preserve field names")
+    input_paths = {path.resolve() for path in (
+        args.network, args.depth_curve, args.velocity_curve,
+    ) if path is not None}
+    output_paths = [path.resolve() for path in (
+        args.output_csv, output_network, args.curves_csv,
+    ) if path is not None]
+    if len(set(output_paths)) != len(output_paths) or input_paths.intersection(output_paths):
+        raise SystemExit("Use distinct output paths that do not overwrite any input file")
 
     try:
         import geopandas as gpd
@@ -108,10 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             life_stage=args.life_stage,
         )
 
-    result = model_reaches(
-        reaches,
-        depth_curve,
-        velocity_curve,
+    model_options = dict(
         slope_col=args.slope_col,
         width_col=args.width_col,
         depth_col=args.depth_col,
@@ -119,12 +155,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         id_col=args.id_col,
         max_depth_col=args.max_depth_col,
         shape_factor_col=args.shape_factor_col,
-        discharges=args.q_values,
-        discharge_col=args.discharge_col,
     )
+    result = model_reaches(
+        reaches, depth_curve, velocity_curve,
+        flow_cols=args.flow_cols, flow_units=args.flow_units,
+        **model_options,
+    )
+    curves = None
+    if args.curves_csv is not None:
+        curves = model_reaches(
+            reaches, depth_curve, velocity_curve,
+            output="curves", full_curve=not has_selected_q,
+            discharges=args.q_values, discharge_col=args.discharge_col,
+            **model_options,
+        )
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(args.output_csv, index=False)
-    print(f"Wrote {len(result):,} modeled reach-discharge rows to {args.output_csv}")
+    output_network.parent.mkdir(parents=True, exist_ok=True)
+    result.to_file(output_network, layer=args.output_layer, driver="GPKG", index=False)
+    result.drop(columns=[result.geometry.name]).to_csv(args.output_csv, index=False)
+    if curves is not None:
+        args.curves_csv.parent.mkdir(parents=True, exist_ok=True)
+        curves.to_csv(args.curves_csv, index=False)
+        print(f"Wrote {len(curves):,} reach-discharge rows to {args.curves_csv}")
+    print(f"Wrote {len(result):,} segment summaries to {args.output_csv}")
+    print(f"Wrote attributed network to {output_network} (layer: {args.output_layer})")
     return 0
 
 

@@ -36,6 +36,7 @@ class BatchTests(unittest.TestCase):
             depth_col="depth_m",
             d84_col="d84_mm",
             id_col="segment_uid",
+            output="curves",
             discharge_col="flow_m3s",
         )
         self.assertEqual(result["reach_id"].tolist(), [101, 102])
