@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 import json
+from numbers import Real
 import warnings
 
 import numpy as np
@@ -14,13 +15,54 @@ from .habitat import habitat
 from .hydraulics import _approx_like_r, avg_hydraulics
 
 CFS_TO_M3S = 0.028316846592
-_SUMMARY_COLUMNS = ("WUA_auc", "WUA_Q_min_m3s", "WUA_Q_max_m3s", "WUA_Q_count")
+_SUMMARY_COLUMNS = ("WUA_auc", "WUA_Q_min_m3s", "WUA_Q_max_m3s", "WUA_Q_count", "s.suit")
 _FLOW_COLUMNS = (
     "WUA by flowrate",
     "WUA flow fields",
     "WUA flow units",
     "WUA flow fields excluded",
 )
+
+
+def _missing_model_input(value: object) -> bool:
+    """Identify absent hydraulic inputs without hiding invalid finite values."""
+    return bool(pd.isna(value)) or (
+        isinstance(value, Real) and not np.isfinite(value)
+    )
+
+
+def group_grain_sizes(
+    samples: pd.DataFrame,
+    *,
+    id_col: str,
+    size_col: str = "grain_size_mm",
+) -> dict[object, np.ndarray]:
+    """Group individual grain-size observations (mm) by reach ID.
+
+    Each row is one observation, as in the GIFT ``gsd`` argument. A D84
+    percentile used for hydraulics does not replace these observations.
+    """
+    if not isinstance(samples, pd.DataFrame):
+        raise TypeError("samples must be a pandas DataFrame")
+    if not samples.columns.is_unique:
+        raise ValueError("samples must have unique column names")
+    missing = {id_col, size_col} - set(samples.columns)
+    if missing:
+        raise ValueError(f"samples is missing required columns: {sorted(missing)}")
+    if samples.empty or samples[id_col].isna().any():
+        raise ValueError(f"samples must contain non-missing {id_col} values")
+    try:
+        sizes = pd.to_numeric(samples[size_col], errors="raise").to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{size_col} must contain numeric grain sizes in mm") from exc
+    if not np.isfinite(sizes).all() or (sizes < 0).any():
+        raise ValueError(f"{size_col} must contain finite, nonnegative grain sizes in mm")
+    values = samples[[id_col]].copy()
+    values[size_col] = sizes
+    return {
+        reach_id: group[size_col].to_numpy(dtype=float)
+        for reach_id, group in values.groupby(id_col, sort=False)
+    }
 
 
 def integrate_wua_curve(curve: pd.DataFrame) -> float:
@@ -70,6 +112,7 @@ def _habitat_at_flows(
     velocity_curve: pd.DataFrame,
     substrate_curve: pd.DataFrame | None,
     gsd: np.ndarray | None,
+    substrate_size_mm: float | None = None,
 ) -> pd.DataFrame:
     # Selected flows can intentionally contain fewer than three rows.
     with warnings.catch_warnings():
@@ -81,6 +124,7 @@ def _habitat_at_flows(
         return habitat(
             hydraulics, depth_curve, velocity_curve,
             substrate_curve=substrate_curve, gsd=gsd,
+            substrate_size_mm=substrate_size_mm,
         )
 
 
@@ -93,6 +137,7 @@ def _flow_summary(
     velocity_curve: pd.DataFrame,
     substrate_curve: pd.DataFrame | None,
     gsd: np.ndarray | None,
+    substrate_size_mm: float | None,
 ) -> dict[str, object]:
     """Evaluate each usable field before taking an equally weighted median."""
     used: list[str] = []
@@ -145,6 +190,7 @@ def _flow_summary(
         # interpolating WUA or evaluating WUA at the median discharge.
         wua_values[positive] = _habitat_at_flows(
             selected, depth_curve, velocity_curve, substrate_curve, gsd,
+            substrate_size_mm,
         )["WUA"].to_numpy(dtype=float)
 
     return {
@@ -175,6 +221,8 @@ def model_reaches(
     full_curve: bool = False,
     substrate_curve: pd.DataFrame | None = None,
     gsd: Iterable[float] | None = None,
+    gsd_by_reach: Mapping[object, Iterable[float]] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> pd.DataFrame:
     """Run GIFT for each input segment and return attributed segment metrics.
 
@@ -198,6 +246,19 @@ def model_reaches(
     ``discharge_col`` (both in m3/s). Use ``full_curve=True`` in curves mode
     to export the native curve used for integration, or omit it to use the
     original GIFT discharge grid. Summary mode always uses the full curve.
+
+    With ``substrate_curve`` alone, use each reach's ``d84_col`` value as a
+    representative substrate size and look up its class suitability. To use
+    the original GIFT grain-size-distribution calculation instead, also supply
+    one shared ``gsd`` or ``gsd_by_reach`` keyed by ``id_col``. Every reach
+    must have observations in the latter case. The score is returned as
+    ``s.suit`` in summary mode.
+
+    Reaches with missing or non-finite values in mapped hydraulic inputs (or
+    the selected discharge column) retain their input row and have null model
+    metrics. In curves mode, each such reach gets one row with null curve
+    values. ``progress_callback`` receives (processed_reaches, total_reaches)
+    after each reach, including skipped reaches.
     """
     if not isinstance(reaches, pd.DataFrame):
         raise TypeError("reaches must be a pandas DataFrame or GeoDataFrame")
@@ -219,6 +280,21 @@ def model_reaches(
     fields = _flow_options(reaches, flow_cols, flow_units)
     if output == "curves" and fields:
         raise ValueError("flow_cols requires output='summary'")
+    if gsd is not None and gsd_by_reach is not None:
+        raise ValueError("Use either gsd or gsd_by_reach, not both")
+    if substrate_curve is None and (gsd is not None or gsd_by_reach is not None):
+        raise ValueError("gsd or gsd_by_reach requires substrate_curve")
+    if gsd_by_reach is not None:
+        if id_col is None:
+            raise ValueError("gsd_by_reach requires id_col")
+        if not isinstance(gsd_by_reach, Mapping):
+            raise TypeError("gsd_by_reach must map reach IDs to grain-size observations")
+        per_reach_gsd = {
+            reach_id: np.asarray(list(sizes), dtype=float)
+            for reach_id, sizes in gsd_by_reach.items()
+        }
+    else:
+        per_reach_gsd = None
 
     requested_columns = [slope_col, width_col, depth_col, d84_col]
     requested_columns.extend(
@@ -237,10 +313,44 @@ def model_reaches(
     outputs: list[pd.DataFrame] = []
     summaries: list[dict[str, object]] = []
     excluded_reaches = 0
+    skipped_reaches = 0
+    total_reaches = len(reaches)
     for position, (index, reach) in enumerate(reaches.iterrows()):
         # Access the original column to preserve integer IDs without iterrows
         # coercion. Summary attribution is positional, never a join on IDs.
         reach_id = reaches[id_col].iloc[position] if id_col is not None else index
+        model_columns = (slope_col, width_col, depth_col, d84_col)
+        optional_columns = (max_depth_col, shape_factor_col, discharge_col)
+        if any(_missing_model_input(reach[column]) for column in (
+            *model_columns, *(name for name in optional_columns if name is not None),
+        )):
+            skipped_reaches += 1
+            if output == "curves":
+                outputs.append(pd.DataFrame([{
+                    "reach_id": reach_id, "Q": np.nan, "d.suit": np.nan,
+                    "v.suit": np.nan, "s.suit": np.nan, "w": np.nan,
+                    "WUA": np.nan,
+                }]))
+            else:
+                summaries.append({column: None for column in (
+                    *_SUMMARY_COLUMNS, *(_FLOW_COLUMNS if fields else ()),
+                )})
+            if progress_callback is not None:
+                progress_callback(position + 1, total_reaches)
+            continue
+        if per_reach_gsd is not None:
+            if pd.isna(reach_id) or reach_id not in per_reach_gsd:
+                raise ValueError(
+                    f"Reach {reach_id} (row {position}) has no grain-size observations"
+                )
+            reach_gsd = per_reach_gsd[reach_id]
+        else:
+            reach_gsd = shared_gsd
+        substrate_size_mm = (
+            reach[d84_col]
+            if substrate_curve is not None and reach_gsd is None
+            else None
+        )
         reach_discharges = (
             float(reach[discharge_col]) if discharge_col is not None
             else shared_discharges
@@ -268,11 +378,14 @@ def model_reaches(
                 f"for reach {reach_id!r}"
             )
         curve = _habitat_at_flows(
-            hydraulics, depth_curve, velocity_curve, substrate_curve, shared_gsd,
+            hydraulics, depth_curve, velocity_curve, substrate_curve, reach_gsd,
+            substrate_size_mm,
         )
         if output == "curves":
             curve.insert(0, "reach_id", reach_id)
             outputs.append(curve)
+            if progress_callback is not None:
+                progress_callback(position + 1, total_reaches)
             continue
 
         summary = {
@@ -280,14 +393,26 @@ def model_reaches(
             "WUA_Q_min_m3s": float(curve["Q"].min()),
             "WUA_Q_max_m3s": float(curve["Q"].max()),
             "WUA_Q_count": len(curve),
+            "s.suit": float(curve["s.suit"].iloc[0]),
         }
         if fields:
             summary.update(_flow_summary(
                 reach, fields, flow_units, hydraulics,
-                depth_curve, velocity_curve, substrate_curve, shared_gsd,
+                depth_curve, velocity_curve, substrate_curve, reach_gsd,
+                substrate_size_mm,
             ))
             excluded_reaches += summary["WUA flow fields excluded"] != "{}"
         summaries.append(summary)
+        if progress_callback is not None:
+            progress_callback(position + 1, total_reaches)
+
+    if skipped_reaches:
+        warnings.warn(
+            f"{skipped_reaches} segment(s) have missing or non-finite model "
+            "inputs; their model results are null.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if output == "curves":
         if not outputs:
@@ -303,11 +428,12 @@ def model_reaches(
         result = result.drop(columns=list(_FLOW_COLUMNS), errors="ignore")
     for column in (*_SUMMARY_COLUMNS, *(_FLOW_COLUMNS if fields else ())):
         values = [summary[column] for summary in summaries]
-        dtype = (
-            str if column in _FLOW_COLUMNS[1:]
-            else int if column == "WUA_Q_count" else float
-        )
-        result[column] = np.asarray(values, dtype=dtype)
+        if column == "WUA_Q_count":
+            result[column] = pd.array(values, dtype="Int64")
+        elif column in _FLOW_COLUMNS[1:]:
+            result[column] = np.asarray(values, dtype=object)
+        else:
+            result[column] = np.asarray(values, dtype=float)
     if excluded_reaches:
         warnings.warn(
             f"{excluded_reaches} segment(s) excluded one or more selected flows. "

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .batch import model_reaches
+from .batch import group_grain_sizes, model_reaches
 from .curves import load_example_curve
 
 
@@ -59,6 +59,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--depth-curve", type=Path)
     parser.add_argument("--velocity-curve", type=Path)
+    parser.add_argument(
+        "--substrate-curve", type=Path,
+        help="CSV with lower, upper (mm), and suit columns; uses reach D84 by default",
+    )
+    parser.add_argument(
+        "--grain-sizes", type=Path,
+        help="CSV with one grain-size observation per row and a matching reach ID",
+    )
+    parser.add_argument("--grain-id-col", help="Reach ID field in --grain-sizes; defaults to --id-col")
+    parser.add_argument("--grain-size-col", default="grain_size_mm")
     parser.add_argument("--species", default="rainbow")
     parser.add_argument("--life-stage", default="parr")
     return parser
@@ -90,6 +100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(
             "--depth-curve and --velocity-curve must be supplied together"
         )
+    if args.grain_sizes is not None and args.substrate_curve is None:
+        raise SystemExit("--grain-sizes requires --substrate-curve")
     if args.discharge_col is not None and args.q_values is not None:
         raise SystemExit("Use either --discharge-col or --q-values, not both")
     if args.flow_cols and args.flow_units is None:
@@ -107,6 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--output-network must be a .gpkg file to preserve field names")
     input_paths = {path.resolve() for path in (
         args.network, args.depth_curve, args.velocity_curve,
+        args.substrate_curve, args.grain_sizes,
     ) if path is not None}
     output_paths = [path.resolve() for path in (
         args.output_csv, output_network, args.curves_csv,
@@ -147,6 +160,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             life_stage=args.life_stage,
         )
 
+    substrate_curve = None
+    gsd_by_reach = None
+    if args.substrate_curve is not None:
+        substrate_curve = _custom_curve(
+            args.substrate_curve,
+            species=args.species,
+            life_stage=args.life_stage,
+        )
+        if args.grain_sizes is not None:
+            gsd_by_reach = group_grain_sizes(
+                pd.read_csv(args.grain_sizes),
+                id_col=args.grain_id_col or args.id_col,
+                size_col=args.grain_size_col,
+            )
+
     model_options = dict(
         slope_col=args.slope_col,
         width_col=args.width_col,
@@ -155,6 +183,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         id_col=args.id_col,
         max_depth_col=args.max_depth_col,
         shape_factor_col=args.shape_factor_col,
+        substrate_curve=substrate_curve,
+        gsd_by_reach=gsd_by_reach,
     )
     result = model_reaches(
         reaches, depth_curve, velocity_curve,

@@ -92,6 +92,34 @@ def substrate_suitability(
     return float(np.dot(counts, curve["suit"]) / classified_count)
 
 
+def substrate_suitability_at_size(
+    substrate_curve: pd.DataFrame,
+    grain_size_mm: float,
+) -> float:
+    """Look up suitability for one representative grain size in millimeters.
+
+    This class lookup is an alternative to the original GIFT calculation,
+    which averages suitability across a grain-size distribution.
+    """
+    curve = _validate_suitability_curve(
+        substrate_curve, "substrate_curve", ("lower", "upper"),
+    )
+    if (curve["upper"] <= curve["lower"]).any():
+        raise ValueError("Each substrate_curve upper bound must exceed its lower bound")
+    try:
+        size = float(grain_size_mm)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("grain_size_mm must be a finite, nonnegative number") from exc
+    if not np.isfinite(size) or size < 0:
+        raise ValueError("grain_size_mm must be a finite, nonnegative number")
+    matching = curve.loc[(curve["lower"] <= size) & (size < curve["upper"])]
+    if len(matching) != 1:
+        raise ValueError(
+            f"grain_size_mm={size:g} must fall in exactly one substrate class"
+        )
+    return float(matching["suit"].iloc[0])
+
+
 def _normal_pdf(values: np.ndarray, mean: float, sd: float) -> np.ndarray:
     standardized = (values - mean) / sd
     return np.exp(-0.5 * standardized**2) / (sd * np.sqrt(2.0 * np.pi))
@@ -159,6 +187,7 @@ def habitat(
     *,
     substrate_curve: pd.DataFrame | None = None,
     gsd: Sequence[float] | np.ndarray | pd.Series | None = None,
+    substrate_size_mm: float | None = None,
     output_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Calculate reach-averaged suitability and weighted usable area.
@@ -178,8 +207,12 @@ def habitat(
         Optional DataFrame with ``lower`` and ``upper`` grain-size bounds
         (mm) and a ``suit`` column.
     gsd
-        Optional grain-size observations in mm. Both ``substrate_curve`` and
-        ``gsd`` are required to alter substrate suitability from 1.0.
+        Optional grain-size observations in mm. Supply with
+        ``substrate_curve`` for the original GIFT distribution-weighted score.
+    substrate_size_mm
+        Optional representative grain size in mm (for example D84). Uses the
+        containing substrate class directly, instead of averaging over a GSD.
+        Supply this or ``gsd``, not both.
     output_dir
         Optional directory for ``WUA_Q.jpeg``.
 
@@ -217,7 +250,15 @@ def habitat(
         ("velocity",),
     )
 
-    if (substrate_curve is None) != (gsd is None):
+    if gsd is not None and substrate_size_mm is not None:
+        raise ValueError("Use either gsd or substrate_size_mm, not both")
+    if substrate_size_mm is not None:
+        if substrate_curve is None:
+            raise ValueError("substrate_size_mm requires substrate_curve")
+        substrate_score = substrate_suitability_at_size(
+            substrate_curve, substrate_size_mm,
+        )
+    elif (substrate_curve is None) != (gsd is None):
         warnings.warn(
             "Both substrate_curve and gsd are required; substrate "
             "suitability defaults to 1.0",

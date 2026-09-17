@@ -168,6 +168,46 @@ class NetworkMetricsTests(unittest.TestCase):
         self.assertIn("WUA_auc", result.columns)
         self.assertIn("WUA by flowrate", result.columns)
 
+    def test_missing_hydraulic_inputs_keep_features_and_null_all_model_metrics(self):
+        reaches = pd.concat([self.reaches.iloc[:1]] * 4)
+        reaches["width_m"] = pd.array([10.0, np.nan, pd.NA, np.inf], dtype="Float64")
+        progress = []
+        with self.assertWarnsRegex(UserWarning, "3 segment\\(s\\).*results are null"):
+            result = self.model(
+                reaches, flow_cols=["Q_low"], flow_units="m3/s",
+                progress_callback=lambda done, total: progress.append((done, total)),
+            )
+        self.assertEqual(progress, [(1, 4), (2, 4), (3, 4), (4, 4)])
+        self.assertEqual(len(result), len(reaches))
+        self.assertEqual(result.index.tolist(), reaches.index.tolist())
+        self.assertTrue(pd.notna(result.iloc[0]["WUA_auc"]))
+        for column in (
+            "WUA_auc", "WUA_Q_min_m3s", "WUA_Q_max_m3s", "WUA_Q_count",
+            "s.suit", "WUA by flowrate", "WUA flow fields", "WUA flow units",
+            "WUA flow fields excluded",
+        ):
+            self.assertTrue(result.iloc[1:][column].isna().all(), column)
+
+    def test_missing_selected_discharge_keeps_null_curve_row(self):
+        reaches = self.reaches.copy()
+        reaches.iloc[1, reaches.columns.get_loc("Q_low")] = np.nan
+        progress = []
+        with self.assertWarnsRegex(UserWarning, "1 segment\\(s\\).*results are null"):
+            result = self.model(
+                reaches, output="curves", discharge_col="Q_low",
+                progress_callback=lambda done, total: progress.append((done, total)),
+            )
+        self.assertEqual(progress, [(1, 2), (2, 2)])
+        self.assertEqual(result["reach_id"].tolist(), [101, 101])
+        self.assertTrue(result.iloc[1].drop("reach_id").isna().all())
+        self.assertTrue(pd.notna(result.iloc[0]["WUA"]))
+
+    def test_invalid_finite_hydraulic_values_still_raise(self):
+        reaches = self.reaches.iloc[:1].copy()
+        reaches["width_m"] = -1.0
+        with self.assertRaisesRegex(ValueError, "bankfull_width must be greater than zero"):
+            self.model(reaches)
+
     @unittest.skipIf(gpd is None, "Install the network extra for GeoPackage checks")
     def test_cli_writes_summary_and_geopackage_with_exact_field_names(self):
         streams = gpd.GeoDataFrame(
@@ -216,6 +256,8 @@ class NetworkMetricsTests(unittest.TestCase):
     def test_cli_rejects_missing_units_and_input_overwrite_before_reading(self):
         with self.assertRaisesRegex(SystemExit, "requires --flow-units"):
             cli_main(["input.gpkg", "output.csv", "--flow-cols", "Q_low"])
+        with self.assertRaisesRegex(SystemExit, "--grain-sizes requires --substrate-curve"):
+            cli_main(["input.gpkg", "output.csv", "--grain-sizes", "samples.csv"])
         with self.assertRaisesRegex(SystemExit, "distinct output paths"):
             cli_main(["input.gpkg", "input.csv"])
 

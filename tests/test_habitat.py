@@ -10,6 +10,7 @@ from gift_habitat import (
     habitat,
     load_example_curve,
     substrate_suitability,
+    substrate_suitability_at_size,
 )
 
 
@@ -67,6 +68,30 @@ class HabitatTests(unittest.TestCase):
         )
         gsd = np.array([1, 2, 3, 4, 10, 11, 12, 13, 14, 15])
         self.assertAlmostEqual(substrate_suitability(curve, gsd), 0.7)
+
+    def test_representative_size_uses_its_class_and_rejects_gaps(self) -> None:
+        curve = pd.DataFrame({
+            "lower": [0, 10], "upper": [10, 20], "suit": [0.25, 0.75],
+        })
+        self.assertEqual(substrate_suitability_at_size(curve, 9.999), 0.25)
+        self.assertEqual(substrate_suitability_at_size(curve, 10), 0.75)
+        with self.assertRaisesRegex(ValueError, "exactly one substrate class"):
+            substrate_suitability_at_size(curve, 20)
+        hydraulics = avg_hydraulics(
+            0.01, 10, 0.5, 100, discharges=[0.01, 0.02, 0.03],
+        )
+        baseline = habitat(hydraulics, self.depth_curve, self.velocity_curve)
+        result = habitat(
+            hydraulics, self.depth_curve, self.velocity_curve,
+            substrate_curve=curve, substrate_size_mm=10,
+        )
+        np.testing.assert_allclose(result["s.suit"], 0.75)
+        np.testing.assert_allclose(result["WUA"], baseline["WUA"] * 0.75)
+        with self.assertRaisesRegex(ValueError, "either gsd or substrate_size_mm"):
+            habitat(
+                hydraulics, self.depth_curve, self.velocity_curve,
+                substrate_curve=curve, gsd=[10], substrate_size_mm=10,
+            )
 
     def test_one_substrate_input_defaults_to_one_with_warning(self) -> None:
         hydraulics = avg_hydraulics(

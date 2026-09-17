@@ -7,13 +7,14 @@ from gift_habitat import avg_hydraulics, habitat, load_example_curve
 
 def main() -> None:
     output_dir = Path("gift_outputs")
+    d84_mm = 100.0
 
     hydraulics = avg_hydraulics(
         slope=0.01,
         bankfull_width=10.0,
         bankfull_depth=0.5,
         max_bankfull_depth=0.75,
-        d84_mm=100.0,
+        d84_mm=d84_mm,
         output_dir=output_dir,
     )
 
@@ -27,10 +28,15 @@ def main() -> None:
         species="rainbow",
         life_stage="parr",
     )
+    substrate_curve = load_example_curve(
+        "substrate", species="rainbow", life_stage="parr",
+    )
     wua = habitat(
         hydraulics,
         depth_curve,
         velocity_curve,
+        substrate_curve=substrate_curve,
+        substrate_size_mm=d84_mm,  # D84 class lookup; supply gsd for R-style averaging.
         output_dir=output_dir,
     )
 

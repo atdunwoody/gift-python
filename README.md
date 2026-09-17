@@ -212,12 +212,12 @@ print(available_example_curves())
 
 ## Include substrate suitability
 
-D84 affects the hydraulic calculation through Ferguson's flow-resistance relation. It does not directly provide substrate suitability.
-
-Substrate suitability requires:
-
-1. A substrate suitability curve.
-2. An observed or simulated grain-size distribution.
+D84 affects the hydraulic calculation through Ferguson's flow-resistance
+relation. It can also serve as a representative grain size for a direct lookup
+in a substrate suitability curve. The direct lookup assigns the suitability of
+the class containing D84 to the entire reach. The [original R `Habitat()`](https://github.com/SGronsdahl/GIFT/blob/main/R/Habitat.R)
+instead averages class suitabilities over a supplied grain-size distribution
+(`gsd`). Both methods are supported, and they can give different results.
 
 The substrate curve must contain `lower`, `upper`, and `suit` columns:
 
@@ -230,7 +230,26 @@ lower,upper,suit
 256.0,1000.0,0.2
 ```
 
-Example:
+For a single reach, use D84 (mm) as the representative substrate size:
+
+```python
+import pandas as pd
+from gift_habitat import habitat
+
+substrate_curve = pd.read_csv("substrate_suitability.csv")
+wua = habitat(
+    hydraulics, depth_curve, velocity_curve,
+    substrate_curve=substrate_curve,
+    substrate_size_mm=100.0,
+)
+```
+
+The class includes its lower bound and excludes its upper bound. A D84 of
+64 mm, for example, uses the suitability of the 64–256 mm class. If D84 falls
+in no class or more than one class, the lookup raises an error.
+
+To use the original R distribution-weighted method, supply grain-size
+observations instead of `substrate_size_mm`:
 
 ```python
 import pandas as pd
@@ -249,13 +268,60 @@ wua = habitat(
 )
 ```
 
-If either the substrate curve or grain-size distribution is omitted, substrate suitability defaults to 1.0.
+For a single reach, `habitat()` uses substrate suitability of 1.0 when all
+substrate inputs are omitted. For network runs, supplying only a substrate
+curve applies the D84 lookup to each reach. Supply grain-size observations as
+well to use the distribution-weighted method instead.
+
+For a stream network with grain-size distributions, supply observations for
+**each reach**. The CSV has one measured or simulated grain-size observation
+(mm) per row (abbreviated example):
+
+```csv
+COMID,grain_size_mm
+1001,8
+1001,12
+1001,30
+1002,62
+1002,105
+```
+
+Both CSVs can include additional columns; suitability rows can be filtered by
+`species` and `life_stage`. For a GSD, each observation receives the suitability
+of its class; the classified observations' mean is the reach's `s.suit`. For a
+D84 lookup, `s.suit` is the value of the one class containing D84. Both methods
+multiply depth suitability, velocity suitability, and wetted width by
+`s.suit` at every modeled flow.
+
+```python
+from gift_habitat import group_grain_sizes, model_reaches
+
+substrate_curve = pd.read_csv("substrate_suitability.csv")
+gsd_by_reach = group_grain_sizes(
+    pd.read_csv("grain_sizes_by_reach.csv"),
+    id_col="COMID",
+    size_col="grain_size_mm",
+)
+results = model_reaches(
+    streams, depth_curve, velocity_curve,
+    slope_col="slope_ft_ft", width_col="BF_width_m",
+    depth_col="BF_depth_m", d84_col="D84_mm", id_col="COMID",
+    substrate_curve=substrate_curve, gsd_by_reach=gsd_by_reach,
+)
+print(results[["COMID", "s.suit", "WUA_auc"]])
+```
+
+Omit `gsd_by_reach` in this example to use `D84_mm` for the direct class lookup.
+For a GSD, repeated reach IDs share the same observations. Every modeled reach
+must have samples, or the run stops with its ID and row number. `gsd=` can be
+used when one grain-size distribution should apply to all reaches.
 
 ## Model a stream network
 
 `model_reaches()` now returns one row per input segment by default. It preserves the input attributes, geometry, CRS, row order, and index, and adds `WUA_auc`, the area under the entire simulated WUA-discharge curve. Repeated segment IDs remain separate features; no join is needed.
 
 For a script with editable settings, use `examples/stream_network.py`. Set the input paths and hydraulic field names. Leave `BIOLOGICAL_FLOW_FIELDS = []` for full-curve integration only. To add the biological-flow metric, populate that list and set `BIOLOGICAL_FLOW_UNITS` to `"cfs"` or `"m3/s"`.
+If a mapped hydraulic value is missing or non-finite, the feature remains in the output with null model metrics. A summary warning gives the number skipped. The example reports percentage progress every 5% (configurable with `PROGRESS_STEP_PERCENT`). API callers can pass `progress_callback`, which receives `(processed_reaches, total_reaches)` after each feature.
 
 ```python
 from pathlib import Path
@@ -384,6 +450,19 @@ To also calculate the biological-flow metric, append these arguments to the comm
 --flow-cols Q_August Q_September Q_October --flow-units cfs
 ```
 
+To use each reach's D84 as its substrate class in both WUA metrics, also pass:
+
+```powershell
+--substrate-curve "C:\path\to\substrate_suitability.csv"
+```
+
+To calculate the original GSD-weighted score instead, additionally pass
+`--grain-sizes "C:\path\to\grain_sizes_by_reach.csv"`. The grain-size CSV uses
+`--id-col` as its reach ID field by default. Set
+`--grain-id-col` or `--grain-size-col` if its headers differ. The script in
+`examples/stream_network.py` provides the same inputs as editable settings
+for direct use in VSCode.
+
 Use `--flow-units "m3/s"` for fields in cubic meters per second. Quote field names containing spaces.
 
 To additionally save the native WUA curves, append `--curves-csv "C:\path\to\network_wua_curves.csv"`. The legacy `--q-values` and `--discharge-col` arguments now apply only to this optional curve CSV and require `--curves-csv`. They do not change the full-curve integral. The prior one-flow-per-reach use case can instead be summarized on the network with `--flow-cols Q_m3s --flow-units "m3/s"`.
@@ -403,6 +482,7 @@ All input segment attributes and geometries are retained in the GeoPackage; the 
 | Field | Description | Unit |
 | ----- | ----------- | ---- |
 | `WUA_auc` | Area under the entire native WUA-discharge curve | (m²/m) × (m³/s) |
+| `s.suit` | Substrate suitability applied to the reach (1.0 without substrate inputs) | Dimensionless |
 | `WUA_Q_min_m3s` | Lower integration bound | m³/s |
 | `WUA_Q_max_m3s` | Upper integration bound, simulated bankfull flow | m³/s |
 | `WUA_Q_count` | Number of native curve points integrated | Count |
