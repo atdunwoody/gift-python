@@ -29,8 +29,6 @@ def _missing_model_input(value: object) -> bool:
     return bool(pd.isna(value)) or (
         isinstance(value, Real) and not np.isfinite(value)
     )
-
-
 def group_grain_sizes(
     samples: pd.DataFrame,
     *,
@@ -253,7 +251,6 @@ def model_reaches(
     one shared ``gsd`` or ``gsd_by_reach`` keyed by ``id_col``. Every reach
     must have observations in the latter case. The score is returned as
     ``s.suit`` in summary mode.
-
     Reaches with missing or non-finite values in mapped hydraulic inputs (or
     the selected discharge column) retain their input row and have null model
     metrics. In curves mode, each such reach gets one row with null curve

@@ -17,6 +17,14 @@ DEPTH_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_depth.csv")
 VELOCITY_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_velocity.csv")
 SUBSTRATE_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_substrate.csv")  # Path(r"C:\path\to\substrate_suitability.csv")
 
+# Set SUBSTRATE_CURVE_PATH to use D84_FIELD for a direct class lookup.
+# Optionally set GRAIN_SIZES_PATH to average suitability over the observed
+# grain-size distribution as in the original GIFT R implementation. This CSV
+# needs one observation per row, with COMID and grain_size_mm (mm) by default.
+GRAIN_SIZES_PATH = None  # Path(r"examples\inputs\grain_sizes_by_reach.csv")
+GRAIN_ID_FIELD = "COMID"
+GRAIN_SIZE_FIELD = "grain_size_mm"
+
 # Hydraulic fields: width/depth in meters, slope in m/m or ft/ft, D84 in mm.
 ID_FIELD = "COMID"
 SLOPE_FIELD = "SLOPE"
@@ -95,7 +103,6 @@ def main() -> None:
         if bucket > last_reported_bucket or completed == total:
             print(f"Processed {completed:,}/{total:,} reaches ({percent}%)", flush=True)
             last_reported_bucket = bucket
-
     result = model_reaches(
         streams,
         read_curve(DEPTH_CURVE_PATH),
