@@ -216,6 +216,8 @@ class NetworkMetricsTests(unittest.TestCase):
     def test_cli_rejects_missing_units_and_input_overwrite_before_reading(self):
         with self.assertRaisesRegex(SystemExit, "requires --flow-units"):
             cli_main(["input.gpkg", "output.csv", "--flow-cols", "Q_low"])
+        with self.assertRaisesRegex(SystemExit, "--grain-sizes requires --substrate-curve"):
+            cli_main(["input.gpkg", "output.csv", "--grain-sizes", "samples.csv"])
         with self.assertRaisesRegex(SystemExit, "distinct output paths"):
             cli_main(["input.gpkg", "input.csv"])
 
