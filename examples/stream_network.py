@@ -13,17 +13,9 @@ NETWORK_PATH = Path(r"examples\inputs\UGR_channel_geometry_predictions.gpkg")
 INPUT_LAYER = None  # Set a layer name if the GeoPackage contains several layers.
 OUTPUT_PATH = Path(r"examples\outputs\gift_network_results.gpkg")
 OUTPUT_LAYER = "gift_wua"
-DEPTH_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_depth.csv")
-VELOCITY_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_velocity.csv")
-SUBSTRATE_CURVE_PATH = Path(r"examples\inputs\steelhead_spawning_substrate.csv")  # Path(r"C:\path\to\substrate_suitability.csv")
-
-# Set SUBSTRATE_CURVE_PATH to use D84_FIELD for a direct class lookup.
-# Optionally set GRAIN_SIZES_PATH to average suitability over the observed
-# grain-size distribution as in the original GIFT R implementation. This CSV
-# needs one observation per row, with COMID and grain_size_mm (mm) by default.
-GRAIN_SIZES_PATH = None  # Path(r"examples\inputs\grain_sizes_by_reach.csv")
-GRAIN_ID_FIELD = "COMID"
-GRAIN_SIZE_FIELD = "grain_size_mm"
+DEPTH_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_depth.csv")
+VELOCITY_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_velocity.csv")
+SUBSTRATE_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_substrate.csv")  # Path(r"C:\path\to\substrate_suitability.csv")
 
 # Hydraulic fields: width/depth in meters, slope in m/m or ft/ft, D84 in mm.
 ID_FIELD = "COMID"
@@ -34,25 +26,24 @@ D84_FIELD = "D84_pred"
 MAX_DEPTH_FIELD = None
 SHAPE_FACTOR_FIELD = None
 
-# WUA_auc is always calculated over the full simulated curve.
+# Mean and maximum WUA are always calculated over the full simulated curve.
 # Populate this list to ALSO calculate median WUA at biological flow fields.
 # Example: BIOLOGICAL_FLOW_FIELDS = ["Q_August", "Q_September", "Q_October"]
 BIOLOGICAL_FLOW_FIELDS = []
 BIOLOGICAL_FLOW_UNITS = "cfs"  # Choose "cfs" or "m3/s" for all selected fields.
-PROGRESS_STEP_PERCENT = 5  # Report completed reaches at roughly 5% intervals.
 
 ###############################################################################
 ####################### Optional Inputs Below This Line ########################
 ################################################################################
+PROGRESS_STEP_PERCENT = 5  # Report completed reaches at roughly 5% intervals.
 # Used only if the suitability CSVs contain species/life_stage columns.
-SPECIES = "rainbow"
-LIFE_STAGE = "parr"
+SPECIES = ""
+LIFE_STAGE = ""
 # Optionally set GRAIN_SIZES_PATH to average suitability over the observed
-# grain-size distribution as in the original GIFT R implementation. This CSV
-# needs one observation per row, with COMID and grain_size_mm (mm) by default.
+# grain-size distribution as in the original GIFT R implementation.
 GRAIN_SIZES_PATH = None  # Path(r"C:\path\to\grain_sizes_by_reach.csv")
-GRAIN_ID_FIELD = "COMID"
-GRAIN_SIZE_FIELD = "grain_size_mm"
+GRAIN_ID_FIELD = ""
+GRAIN_SIZE_FIELD = ""
 
 def read_curve(path: Path) -> pd.DataFrame:
     curve = pd.read_csv(path)

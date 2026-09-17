@@ -38,7 +38,7 @@ class BatchTests(unittest.TestCase):
             **options,
         )
         np.testing.assert_allclose(with_substrate["s.suit"], [0.25, 0.75])
-        for field in ("WUA_auc", "WUA by flowrate"):
+        for field in ("WUA_mean", "WUA_max", "WUA by flowrate"):
             np.testing.assert_allclose(
                 with_substrate[field],
                 baseline[field] * with_substrate["s.suit"],
@@ -95,7 +95,7 @@ class BatchTests(unittest.TestCase):
             reaches, depth, velocity, substrate_curve=curve, **options,
         )
         np.testing.assert_allclose(result["s.suit"], [0.25, 0.75])
-        for field in ("WUA_auc", "WUA by flowrate"):
+        for field in ("WUA_mean", "WUA_max", "WUA by flowrate"):
             np.testing.assert_allclose(
                 result[field], baseline[field] * result["s.suit"], rtol=1e-12,
             )

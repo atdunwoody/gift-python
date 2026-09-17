@@ -15,7 +15,16 @@ from .habitat import habitat
 from .hydraulics import _approx_like_r, avg_hydraulics
 
 CFS_TO_M3S = 0.028316846592
-_SUMMARY_COLUMNS = ("WUA_auc", "WUA_Q_min_m3s", "WUA_Q_max_m3s", "WUA_Q_count", "s.suit")
+_SUMMARY_COLUMNS = (
+    "WUA_mean",
+    "WUA_max",
+    "WUA_Q_min_m3s",
+    "WUA_Q_max_m3s",
+    "WUA_Q_at_max_m3s",
+    "WUA_Q_count",
+    "s.suit",
+)
+_LEGACY_SUMMARY_COLUMNS = ("WUA_auc",)
 _FLOW_COLUMNS = (
     "WUA by flowrate",
     "WUA flow fields",
@@ -225,11 +234,13 @@ def model_reaches(
     """Run GIFT for each input segment and return attributed segment metrics.
 
     By default, returns a copy of ``reaches`` with one row per input row,
-    preserving attributes, row order, index, geometry and CRS. ``WUA_auc`` is
-    the area under the full native WUA-discharge curve, from the lowest
-    simulated positive flow through simulated bankfull. Bounds are saved in
-    ``WUA_Q_min_m3s`` and ``WUA_Q_max_m3s``. No extrapolation or normalization
-    is applied. The integral has units (m2/m)*(m3/s).
+    preserving attributes, row order, index, geometry and CRS. ``WUA_mean``
+    and ``WUA_max`` summarize the full native WUA-discharge curve, from the
+    lowest simulated positive flow through simulated bankfull. The modeled
+    discharge range is saved in ``WUA_Q_min_m3s`` and ``WUA_Q_max_m3s``, and
+    ``WUA_Q_at_max_m3s`` records the lowest modeled discharge at which the
+    maximum WUA occurs. ``WUA_mean`` is the arithmetic mean of the native
+    modeled WUA values and is not discharge-weighted.
 
     Add ``flow_cols=[...]`` and explicitly set ``flow_units='cfs'`` or
     ``'m3/s'`` to also calculate ``WUA by flowrate``: the median of WUA values
@@ -242,8 +253,9 @@ def model_reaches(
     ``output='curves'`` retains the earlier long table behavior, with one row
     per reach and discharge. Only that mode accepts ``discharges`` or
     ``discharge_col`` (both in m3/s). Use ``full_curve=True`` in curves mode
-    to export the native curve used for integration, or omit it to use the
-    original GIFT discharge grid. Summary mode always uses the full curve.
+    to export the native curve used for the summary statistics, or omit it
+    to use the original GIFT discharge grid. Summary mode always uses the full
+    native curve.
 
     With ``substrate_curve`` alone, use each reach's ``d84_col`` value as a
     representative substrate size and look up its class suitability. To use
@@ -268,8 +280,8 @@ def model_reaches(
     selected_discharges = discharges is not None or discharge_col is not None
     if output == "summary" and selected_discharges:
         raise ValueError(
-            "Summary mode always integrates the full curve. Use flow_cols and "
-            "flow_units for biological flows, or output='curves' for "
+            "Summary mode always summarizes the full native curve. Use "
+            "flow_cols and flow_units for biological flows, or output='curves' for "
             "discharges/discharge_col."
         )
     if full_curve and selected_discharges:
@@ -385,10 +397,18 @@ def model_reaches(
                 progress_callback(position + 1, total_reaches)
             continue
 
+        wua = curve["WUA"].to_numpy(dtype=float)
+        q = curve["Q"].to_numpy(dtype=float)
+        max_wua = float(np.max(wua))
+        # Curves are ordered by increasing discharge. In the event of an exact
+        # WUA tie, report the lowest modeled discharge attaining the maximum.
+        q_at_max = float(q[np.flatnonzero(wua == max_wua)[0]])
         summary = {
-            "WUA_auc": integrate_wua_curve(curve),
-            "WUA_Q_min_m3s": float(curve["Q"].min()),
-            "WUA_Q_max_m3s": float(curve["Q"].max()),
+            "WUA_mean": float(np.mean(wua)),
+            "WUA_max": max_wua,
+            "WUA_Q_min_m3s": float(np.min(q)),
+            "WUA_Q_max_m3s": float(np.max(q)),
+            "WUA_Q_at_max_m3s": q_at_max,
             "WUA_Q_count": len(curve),
             "s.suit": float(curve["s.suit"].iloc[0]),
         }
@@ -420,6 +440,9 @@ def model_reaches(
 
     # Preserve repeated IDs and duplicate index labels without fan-out.
     result = reaches.copy()
+    # Remove deprecated summary metrics from prior runs so stale integrated
+    # values cannot be mistaken for results from the current calculation.
+    result = result.drop(columns=list(_LEGACY_SUMMARY_COLUMNS), errors="ignore")
     # Remove optional metrics from a prior run when the option is disabled.
     if not fields:
         result = result.drop(columns=list(_FLOW_COLUMNS), errors="ignore")

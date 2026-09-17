@@ -288,7 +288,7 @@ def avg_hydraulics(
         subbankfull range are omitted.
     full_curve
         Return all native water-level simulations, including both discharge
-        endpoints, for integration over the entire modeled range. Cannot be
+        endpoints, for summary statistics over the entire modeled range. Cannot be
         combined with ``discharges``. The default single-reach grid is
         unchanged when this is False.
     output_dir

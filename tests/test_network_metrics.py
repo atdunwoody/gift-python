@@ -67,7 +67,7 @@ class NetworkMetricsTests(unittest.TestCase):
             with self.subTest(q=q, wua=wua), self.assertRaises(ValueError):
                 integrate_wua_curve(pd.DataFrame({"Q": q, "WUA": wua}))
 
-    def test_summary_preserves_rows_and_integrates_through_bankfull(self):
+    def test_summary_reports_mean_max_and_full_discharge_range(self):
         result = self.model()
         pd.testing.assert_frame_equal(result[self.reaches.columns], self.reaches)
         self.assertNotIn("WUA by flowrate", result.columns)
@@ -78,9 +78,14 @@ class NetworkMetricsTests(unittest.TestCase):
         self.assertLess(legacy["Q"].max(), result.iloc[0]["WUA_Q_max_m3s"])
         self.assertEqual(result.iloc[0]["WUA_Q_count"], 981)
         curve = habitat(full, self.depth_curve, self.velocity_curve)
-        integrate = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-        self.assertAlmostEqual(result.iloc[0]["WUA_auc"], integrate(curve["WUA"], curve["Q"]))
-        self.assertFalse(np.isclose(result.iloc[0]["WUA_auc"], result.iloc[1]["WUA_auc"]))
+        self.assertAlmostEqual(result.iloc[0]["WUA_mean"], curve["WUA"].mean())
+        self.assertAlmostEqual(result.iloc[0]["WUA_max"], curve["WUA"].max())
+        max_rows = curve.loc[curve["WUA"] == curve["WUA"].max()]
+        self.assertAlmostEqual(
+            result.iloc[0]["WUA_Q_at_max_m3s"], max_rows["Q"].iloc[0]
+        )
+        self.assertFalse(np.isclose(result.iloc[0]["WUA_mean"], result.iloc[1]["WUA_mean"]))
+        self.assertNotIn("WUA_auc", result.columns)
 
     def test_small_reach_uses_full_range_even_below_default_grid(self):
         tiny = self.reaches.iloc[:1].copy()
@@ -89,7 +94,8 @@ class NetworkMetricsTests(unittest.TestCase):
         tiny["slope"] = 0.001
         result = self.model(tiny)
         self.assertLess(result.iloc[0]["WUA_Q_max_m3s"], 0.001)
-        self.assertTrue(np.isfinite(result.iloc[0]["WUA_auc"]))
+        self.assertTrue(np.isfinite(result.iloc[0]["WUA_mean"]))
+        self.assertTrue(np.isfinite(result.iloc[0]["WUA_max"]))
         self.assertEqual(result.iloc[0]["WUA_Q_count"], 981)
 
     def test_median_is_of_wua_values_not_wua_at_median_flow(self):
@@ -99,7 +105,8 @@ class NetworkMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(result.iloc[0]["WUA by flowrate"], np.median(wua))
         self.assertFalse(np.isclose(result.iloc[0]["WUA by flowrate"], wua[1]))
         self.assertEqual(json.loads(result.iloc[0]["WUA flow fields"]), fields)
-        np.testing.assert_allclose(result["WUA_auc"], self.model()["WUA_auc"])
+        np.testing.assert_allclose(result["WUA_mean"], self.model()["WUA_mean"])
+        np.testing.assert_allclose(result["WUA_max"], self.model()["WUA_max"])
 
     def test_cfs_and_cubic_meters_per_second_produce_equivalent_metrics(self):
         fields = ["Q_low", "Q_peak", "Q_high"]
@@ -109,7 +116,8 @@ class NetworkMetricsTests(unittest.TestCase):
         si_result = self.model(flow_cols=fields, flow_units="m3/s")
         cfs_result = self.model(cfs, flow_cols=fields, flow_units="cfs")
         np.testing.assert_allclose(si_result["WUA by flowrate"], cfs_result["WUA by flowrate"], rtol=1e-12)
-        np.testing.assert_array_equal(si_result["WUA_auc"], cfs_result["WUA_auc"])
+        np.testing.assert_array_equal(si_result["WUA_mean"], cfs_result["WUA_mean"])
+        np.testing.assert_array_equal(si_result["WUA_max"], cfs_result["WUA_max"])
         self.assertEqual(cfs_result.iloc[0]["WUA flow units"], "cfs")
 
     def test_one_even_and_repeated_flow_values(self):
@@ -165,7 +173,10 @@ class NetworkMetricsTests(unittest.TestCase):
     def test_empty_network_has_summary_schema(self):
         result = self.model(self.reaches.iloc[:0], flow_cols=["Q_low"], flow_units="cfs")
         self.assertEqual(len(result), 0)
-        self.assertIn("WUA_auc", result.columns)
+        self.assertIn("WUA_mean", result.columns)
+        self.assertIn("WUA_max", result.columns)
+        self.assertIn("WUA_Q_at_max_m3s", result.columns)
+        self.assertNotIn("WUA_auc", result.columns)
         self.assertIn("WUA by flowrate", result.columns)
 
     def test_missing_hydraulic_inputs_keep_features_and_null_all_model_metrics(self):
@@ -180,9 +191,11 @@ class NetworkMetricsTests(unittest.TestCase):
         self.assertEqual(progress, [(1, 4), (2, 4), (3, 4), (4, 4)])
         self.assertEqual(len(result), len(reaches))
         self.assertEqual(result.index.tolist(), reaches.index.tolist())
-        self.assertTrue(pd.notna(result.iloc[0]["WUA_auc"]))
+        self.assertTrue(pd.notna(result.iloc[0]["WUA_mean"]))
+        self.assertTrue(pd.notna(result.iloc[0]["WUA_max"]))
         for column in (
-            "WUA_auc", "WUA_Q_min_m3s", "WUA_Q_max_m3s", "WUA_Q_count",
+            "WUA_mean", "WUA_max", "WUA_Q_min_m3s", "WUA_Q_max_m3s",
+            "WUA_Q_at_max_m3s", "WUA_Q_count",
             "s.suit", "WUA by flowrate", "WUA flow fields", "WUA flow units",
             "WUA flow fields excluded",
         ):
@@ -238,7 +251,7 @@ class NetworkMetricsTests(unittest.TestCase):
             self.assertEqual(saved.crs, streams.crs)
             self.assertEqual(saved.geometry.to_wkt().tolist(), streams.geometry.to_wkt().tolist())
             self.assertEqual(saved["label"].tolist(), streams["label"].tolist())
-            for column in ("WUA by flowrate", "WUA_auc"):
+            for column in ("WUA by flowrate", "WUA_mean", "WUA_max", "WUA_Q_at_max_m3s"):
                 np.testing.assert_allclose(saved[column], in_memory[column])
                 np.testing.assert_allclose(csv[column], in_memory[column])
             self.assertEqual(json.loads(saved.iloc[0]["WUA flow fields"]), ["Q_low", "Q_peak", "Q_high"])
@@ -251,7 +264,11 @@ class NetworkMetricsTests(unittest.TestCase):
                 "--width-col", "width_m", "--depth-col", "depth_m", "--d84-col", "d84_mm",
             ]), 0)
             self.assertNotIn("WUA by flowrate", pd.read_csv(summary_only).columns)
-            np.testing.assert_allclose(pd.read_csv(summary_only)["WUA_auc"], csv["WUA_auc"])
+            np.testing.assert_allclose(pd.read_csv(summary_only)["WUA_mean"], csv["WUA_mean"])
+            np.testing.assert_allclose(pd.read_csv(summary_only)["WUA_max"], csv["WUA_max"])
+            np.testing.assert_allclose(
+                pd.read_csv(summary_only)["WUA_Q_at_max_m3s"], csv["WUA_Q_at_max_m3s"]
+            )
 
     def test_cli_rejects_missing_units_and_input_overwrite_before_reading(self):
         with self.assertRaisesRegex(SystemExit, "requires --flow-units"):

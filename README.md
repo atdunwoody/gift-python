@@ -308,7 +308,7 @@ results = model_reaches(
     depth_col="BF_depth_m", d84_col="D84_mm", id_col="COMID",
     substrate_curve=substrate_curve, gsd_by_reach=gsd_by_reach,
 )
-print(results[["COMID", "s.suit", "WUA_auc"]])
+print(results[["COMID", "s.suit", "WUA_mean", "WUA_max", "WUA_Q_at_max_m3s"]])
 ```
 
 Omit `gsd_by_reach` in this example to use `D84_mm` for the direct class lookup.
@@ -318,9 +318,9 @@ used when one grain-size distribution should apply to all reaches.
 
 ## Model a stream network
 
-`model_reaches()` now returns one row per input segment by default. It preserves the input attributes, geometry, CRS, row order, and index, and adds `WUA_auc`, the area under the entire simulated WUA-discharge curve. Repeated segment IDs remain separate features; no join is needed.
+`model_reaches()` returns one row per input segment by default. It preserves the input attributes, geometry, CRS, row order, and index, and adds the arithmetic mean and maximum WUA over the full native simulated WUA-discharge curve. Repeated segment IDs remain separate features; no join is needed.
 
-For a script with editable settings, use `examples/stream_network.py`. Set the input paths and hydraulic field names. Leave `BIOLOGICAL_FLOW_FIELDS = []` for full-curve integration only. To add the biological-flow metric, populate that list and set `BIOLOGICAL_FLOW_UNITS` to `"cfs"` or `"m3/s"`.
+For a script with editable settings, use `examples/stream_network.py`. Set the input paths and hydraulic field names. Leave `BIOLOGICAL_FLOW_FIELDS = []` to report only the full-curve mean and maximum WUA statistics. To add the biological-flow metric, populate that list and set `BIOLOGICAL_FLOW_UNITS` to `"cfs"` or `"m3/s"`.
 If a mapped hydraulic value is missing or non-finite, the feature remains in the output with null model metrics. A summary warning gives the number skipped. The example reports percentage progress every 5% (configurable with `PROGRESS_STEP_PERCENT`). API callers can pass `progress_callback`, which receives `(processed_reaches, total_reaches)` after each feature.
 
 ```python
@@ -349,7 +349,7 @@ results = model_reaches(
     id_col="COMID",
 )
 
-# One feature per original stream segment, with WUA_auc attributed directly.
+# One feature per original stream segment, with full-curve WUA statistics attributed directly.
 results.to_file(OUTPUT_PATH, layer="gift_wua", driver="GPKG", index=False)
 results.drop(columns=[results.geometry.name]).to_csv(
     OUTPUT_PATH.with_suffix(".csv"), index=False,
@@ -358,21 +358,21 @@ results.drop(columns=[results.geometry.name]).to_csv(
 
 Replace the example field names with the corresponding fields in the network. Each run uses one selected species/life-stage combination from the supplied suitability curves. Filter multi-species suitability tables before calling the API, as shown above; the CLI and example script can filter them for you.
 
-### Full-curve WUA metric
+### Full-curve WUA metrics
 
-For each segment, `WUA_auc` is calculated by trapezoidal integration of WUA against discharge in m³/s:
+For each segment, the summary uses all 981 native water-level simulations across the full modeled discharge domain. It reports:
 
-```text
-WUA_auc = sum((Q[i+1] - Q[i]) * (WUA[i] + WUA[i+1]) / 2)
-```
+- `WUA_mean`: arithmetic mean of the modeled WUA values. This is a simple mean across native simulation points and is not discharge-weighted.
+- `WUA_max`: maximum modeled WUA.
+- `WUA_Q_min_m3s` and `WUA_Q_max_m3s`: minimum and maximum modeled discharge, which define the discharge range summarized.
+- `WUA_Q_at_max_m3s`: lowest modeled discharge at which `WUA_max` occurs.
+- `WUA_Q_count`: number of native curve points included in the summary.
 
-The calculation uses all 981 native water-level simulations and their actual discharge spacing, sorted by discharge. It includes both endpoints, avoiding truncation by the original fixed discharge grid. The modeled domain begins at the flow corresponding to 2% of the modeled maximum bankfull depth and ends at the simulated bankfull discharge. “Entire curve” means this full modeled domain, not all possible discharges. No curve is extrapolated below the first simulation or above bankfull, and no assumed origin point is added to the integral.
-
-WUA in this implementation is usable area per unit reach length, in m²/m. Therefore, `WUA_auc` has units **(m²/m) × (m³/s)**. It is not a mean WUA, is not normalized by the discharge range, is not multiplied by segment length, and is not weighted by flow duration. The integration bounds are recorded because the modeled flow range varies among segments.
+The modeled domain begins at the flow corresponding to 2% of the modeled maximum bankfull depth and ends at the simulated bankfull discharge. No curve is extrapolated below the first simulation or above bankfull. WUA is usable area per unit reach length in m²/m.
 
 ### Add WUA at biologically relevant flows
 
-Select any number of flow fields and explicitly specify their common units. This option adds a second metric while retaining `WUA_auc`:
+Select any number of flow fields and explicitly specify their common units. This option adds a separate biological-flow metric while retaining the full-curve mean and maximum WUA statistics:
 
 ```python
 results = model_reaches(
@@ -397,7 +397,7 @@ Each selected field has equal weight. With one valid field, the metric is its WU
 
 The output field is named exactly **`WUA by flowrate`**. The second field, **`WUA flow fields`**, records the contributing input field names as a JSON list, for example `["Q_August", "Q_September"]`.
 
-Missing, nonnumeric, negative, non-finite, or out-of-range positive flows are excluded. `WUA flow fields excluded` records each omitted field and its reason, and a summary warning identifies runs with omissions. The median uses the remaining fields; if none can be evaluated, `WUA by flowrate` is null. A specified zero flow is treated as a dry channel and contributes WUA = 0. Positive flows outside the simulated range are not clamped or extrapolated. This zero-flow convention affects only the biological-flow metric, not the full-curve integral.
+Missing, nonnumeric, negative, non-finite, or out-of-range positive flows are excluded. `WUA flow fields excluded` records each omitted field and its reason, and a summary warning identifies runs with omissions. The median uses the remaining fields; if none can be evaluated, `WUA by flowrate` is null. A specified zero flow is treated as a dry channel and contributes WUA = 0. Positive flows outside the simulated range are not clamped or extrapolated. This zero-flow convention affects only the biological-flow metric, not the full-curve summary statistics.
 
 All selected fields must use the same declared units. Units must be supplied whenever `flow_cols` is nonempty. When flow evaluation is disabled, any prior optional WUA flow metrics are removed from the returned result so they are not mistaken for results of the current run.
 
@@ -416,7 +416,7 @@ curves = model_reaches(
     d84_col="D84_mm",
     id_col="COMID",
     output="curves",
-    full_curve=True,  # Export the native curve used for WUA_auc.
+    full_curve=True,  # Export the native curve used for the summary statistics.
 )
 curves.to_csv("network_wua_curves.csv", index=False)
 ```
@@ -429,7 +429,7 @@ The single-reach functions retain their previous default numerical behavior. `av
 
 The package installs the `gift-network` command. The positional output path is now a **per-segment summary CSV**. The command also writes a GeoPackage with the same stem, unless `--output-network` supplies another `.gpkg` path. The default output layer is `gift_wua`; use `--output-layer` to change it.
 
-PowerShell example for the full-curve metric:
+PowerShell example for the full-curve summary metrics:
 
 ```powershell
 gift-network "C:\path\to\stream_network.gpkg" "C:\path\to\network_wua.csv" `
@@ -465,7 +465,7 @@ for direct use in VSCode.
 
 Use `--flow-units "m3/s"` for fields in cubic meters per second. Quote field names containing spaces.
 
-To additionally save the native WUA curves, append `--curves-csv "C:\path\to\network_wua_curves.csv"`. The legacy `--q-values` and `--discharge-col` arguments now apply only to this optional curve CSV and require `--curves-csv`. They do not change the full-curve integral. The prior one-flow-per-reach use case can instead be summarized on the network with `--flow-cols Q_m3s --flow-units "m3/s"`.
+To additionally save the native WUA curves, append `--curves-csv "C:\path\to\network_wua_curves.csv"`. The legacy `--q-values` and `--discharge-col` arguments now apply only to this optional curve CSV and require `--curves-csv`. They do not change the full-curve summary statistics. The prior one-flow-per-reach use case can instead be summarized on the network with `--flow-cols Q_m3s --flow-units "m3/s"`.
 
 If the `gift-network` command is not recognized, use:
 
@@ -481,11 +481,13 @@ All input segment attributes and geometries are retained in the GeoPackage; the 
 
 | Field | Description | Unit |
 | ----- | ----------- | ---- |
-| `WUA_auc` | Area under the entire native WUA-discharge curve | (m²/m) × (m³/s) |
+| `WUA_mean` | Arithmetic mean WUA across the full native curve | m²/m |
+| `WUA_max` | Maximum WUA across the full native curve | m²/m |
 | `s.suit` | Substrate suitability applied to the reach (1.0 without substrate inputs) | Dimensionless |
-| `WUA_Q_min_m3s` | Lower integration bound | m³/s |
-| `WUA_Q_max_m3s` | Upper integration bound, simulated bankfull flow | m³/s |
-| `WUA_Q_count` | Number of native curve points integrated | Count |
+| `WUA_Q_min_m3s` | Minimum modeled discharge | m³/s |
+| `WUA_Q_max_m3s` | Maximum modeled discharge, simulated bankfull flow | m³/s |
+| `WUA_Q_at_max_m3s` | Lowest modeled discharge at which maximum WUA occurs | m³/s |
+| `WUA_Q_count` | Number of native curve points summarized | Count |
 | `WUA by flowrate` | Optional median WUA at the selected flow fields | m²/m |
 | `WUA flow fields` | Optional JSON list of contributing flow field names, in selection order | Text |
 | `WUA flow units` | Optional declared units of the input flow fields | `cfs` or `m3/s` |
@@ -546,7 +548,7 @@ The lower-case Python functions are recommended for new analyses.
 
 ## Validation
 
-The Python implementation is tested against the numerical results published in the original GIFT documentation. Additional tests check analytical trapezoidal integration, full-range endpoints, per-field median WUA, cfs conversion, missing and unsupported flows, repeated segment IDs, and GeoPackage/CSV output with exact field names. Install the network extra to run the GeoPackage checks.
+The Python implementation is tested against the numerical results published in the original GIFT documentation. Additional tests check the full-range mean and maximum WUA summaries, discharge-at-maximum reporting, full-range endpoints, per-field median WUA, cfs conversion, missing and unsupported flows, repeated segment IDs, and GeoPackage/CSV output with exact field names. The standalone integration utility retains its analytical integration tests. Install the network extra to run the GeoPackage checks.
 
 Run the test suite from the source directory:
 
@@ -559,7 +561,7 @@ python -m unittest discover -s tests -v
 * GIFT produces reach-averaged hydraulic and habitat estimates.
 * It does not represent individual pools, riffles, or other channel units.
 * Results depend on the accuracy of bankfull geometry, slope, D84, discharge, and suitability curves.
-* The full-curve integral is limited to the simulated positive-flow range through bankfull. Unsupported positive biological flows are excluded and reported.
+* Full-curve summary statistics are limited to the simulated positive-flow range through bankfull. Unsupported positive biological flows are excluded and reported.
 * WUA results should be interpreted as model-based habitat indices rather than direct measurements of habitat use.
 
 ## Source and license

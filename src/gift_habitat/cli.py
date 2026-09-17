@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--curves-csv", type=Path,
-        help="Optional long CSV; defaults to the full native curves used for WUA_auc",
+        help="Optional long CSV; defaults to the full native curves used for WUA summary statistics",
     )
     parser.add_argument("--id-col", default="segment_uid")
     parser.add_argument("--slope-col", default="slope")
