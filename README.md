@@ -306,9 +306,13 @@ results = model_reaches(
     streams, depth_curve, velocity_curve,
     slope_col="slope_ft_ft", width_col="BF_width_m",
     depth_col="BF_depth_m", d84_col="D84_mm", id_col="COMID",
+    normalize_width_col="late_summer_wetted_width_pred_m",
     substrate_curve=substrate_curve, gsd_by_reach=gsd_by_reach,
 )
-print(results[["COMID", "s.suit", "WUA_mean", "WUA_max", "WUA_Q_at_max_m3s"]])
+print(results[[
+    "COMID", "s.suit", "WUA_mean", "WUA_mean_normalized",
+    "WUA_max", "WUA_max_normalized", "WUA_Q_at_max_m3s",
+]])
 ```
 
 Omit `gsd_by_reach` in this example to use `D84_mm` for the direct class lookup.
@@ -321,6 +325,9 @@ used when one grain-size distribution should apply to all reaches.
 `model_reaches()` returns one row per input segment by default. It preserves the input attributes, geometry, CRS, row order, and index, and adds the arithmetic mean and maximum WUA over the full native simulated WUA-discharge curve. Repeated segment IDs remain separate features; no join is needed.
 
 For a script with editable settings, use `examples/stream_network.py`. Set the input paths and hydraulic field names. Leave `BIOLOGICAL_FLOW_FIELDS = []` to report only the full-curve mean and maximum WUA statistics. To add the biological-flow metric, populate that list and set `BIOLOGICAL_FLOW_UNITS` to `"cfs"` or `"m3/s"`.
+
+To save WUA-versus-discharge plots for selected reaches, populate `PLOT_COMIDS`, for example `PLOT_COMIDS = [23429054, 23428950]`. Each requested reach is rerun using the full native discharge curve used for the summary statistics, and a 300-dpi PNG is written to the `plots` folder beside the network output, such as `outputs/plots/COMID_23429054_WUA_vs_Q.png`. Leave `PLOT_COMIDS = []` to disable plotting. Requested COMIDs that are not present are reported and skipped; reaches with null model inputs do not produce a plot.
+
 If a mapped hydraulic value is missing or non-finite, the feature remains in the output with null model metrics. A summary warning gives the number skipped. The example reports percentage progress every 5% (configurable with `PROGRESS_STEP_PERCENT`). API callers can pass `progress_callback`, which receives `(processed_reaches, total_reaches)` after each feature.
 
 ```python
@@ -347,6 +354,7 @@ results = model_reaches(
     depth_col="BF_depth_m",
     d84_col="D84_mm",
     id_col="COMID",
+    normalize_width_col="late_summer_wetted_width_pred_m",
 )
 
 # One feature per original stream segment, with full-curve WUA statistics attributed directly.
@@ -364,11 +372,19 @@ For each segment, the summary uses all 981 native water-level simulations across
 
 - `WUA_mean`: arithmetic mean of the modeled WUA values. This is a simple mean across native simulation points and is not discharge-weighted.
 - `WUA_max`: maximum modeled WUA.
+- `WUA_dimensionless_mean`: arithmetic mean of `d.suit * v.suit * s.suit` across the same native simulation points. Wetted width is not included.
+- `WUA_dimensionless_max`: maximum value of `d.suit * v.suit * s.suit` across the same native simulation points. Wetted width is not included.
+- `WUA_mean_normalized`: `WUA_mean` divided by the selected reach-level normalization width.
+- `WUA_max_normalized`: `WUA_max` divided by the selected reach-level normalization width.
 - `WUA_Q_min_m3s` and `WUA_Q_max_m3s`: minimum and maximum modeled discharge, which define the discharge range summarized.
 - `WUA_Q_at_max_m3s`: lowest modeled discharge at which `WUA_max` occurs.
 - `WUA_Q_count`: number of native curve points included in the summary.
+- `d.suit_mean`: arithmetic mean depth suitability across the same native modeled discharge curve.
+- `v.suit_mean`: arithmetic mean velocity suitability across the same native modeled discharge curve.
 
-The modeled domain begins at the flow corresponding to 2% of the modeled maximum bankfull depth and ends at the simulated bankfull discharge. No curve is extrapolated below the first simulation or above bankfull. WUA is usable area per unit reach length in m²/m.
+The modeled domain begins at the flow corresponding to 2% of the modeled maximum bankfull depth and ends at the simulated bankfull discharge. No curve is extrapolated below the first simulation or above bankfull. WUA is usable area per unit reach length in m²/m. The `WUA_dimensionless_*` metrics are dimensionless habitat-suitability products and range from 0 to 1 when all three component suitability scores are bounded from 0 to 1.
+
+To compare reaches after scaling out a selected width, pass `normalize_width_col`. For this network, use `late_summer_wetted_width_pred_m`. The normalized metrics are dimensionless and are calculated as raw WUA divided by that fixed reach-level width. Because the denominator is the predicted late-summer wetted width rather than the modeled wetted width at each discharge, normalized values are not constrained to 0–1. Missing, non-finite, zero, or negative normalization widths leave the raw WUA results intact and return null normalized WUA values for those reaches.
 
 ### Add WUA at biologically relevant flows
 
@@ -384,6 +400,7 @@ results = model_reaches(
     depth_col="BF_depth_m",
     d84_col="D84_mm",
     id_col="COMID",
+    normalize_width_col="late_summer_wetted_width_pred_m",
     flow_cols=["Q_August", "Q_September", "Q_October"],
     flow_units="cfs",  # Use "m3/s" for cubic meters per second.
 )
@@ -395,7 +412,7 @@ For each segment, the model converts the selected discharges to m³/s when neces
 
 Each selected field has equal weight. With one valid field, the metric is its WUA. With an even number of fields, the median is the mean of the two middle WUA values. Different fields containing the same flow each contribute once. Duplicate field names are rejected.
 
-The output field is named exactly **`WUA by flowrate`**. The second field, **`WUA flow fields`**, records the contributing input field names as a JSON list, for example `["Q_August", "Q_September"]`.
+The output field is named exactly **`WUA by flowrate`**. If `normalize_width_col` is supplied, **`WUA by flowrate normalized`** is also returned using the same reach-level width denominator. The second field, **`WUA flow fields`**, records the contributing input field names as a JSON list, for example `["Q_August", "Q_September"]`.
 
 Missing, nonnumeric, negative, non-finite, or out-of-range positive flows are excluded. `WUA flow fields excluded` records each omitted field and its reason, and a summary warning identifies runs with omissions. The median uses the remaining fields; if none can be evaluated, `WUA by flowrate` is null. A specified zero flow is treated as a dry channel and contributes WUA = 0. Positive flows outside the simulated range are not clamped or extrapolated. This zero-flow convention affects only the biological-flow metric, not the full-curve summary statistics.
 
@@ -415,13 +432,14 @@ curves = model_reaches(
     depth_col="BF_depth_m",
     d84_col="D84_mm",
     id_col="COMID",
+    normalize_width_col="late_summer_wetted_width_pred_m",
     output="curves",
     full_curve=True,  # Export the native curve used for the summary statistics.
 )
 curves.to_csv("network_wua_curves.csv", index=False)
 ```
 
-In curves mode, omit `full_curve=True` to use the original GIFT discharge grid, or pass `discharges=[0.1, 0.25, 0.5]` or `discharge_col="Q_m3s"` to evaluate specified flows in m³/s. These discharge selectors are available only in curves mode and cannot be combined with `full_curve=True`. Use `flow_cols` and `flow_units` for the optional median metric in summary mode. Curve output remains a long table, so repeated reach IDs are not unique join keys.
+In curves mode, omit `full_curve=True` to use the original GIFT discharge grid, or pass `discharges=[0.1, 0.25, 0.5]` or `discharge_col="Q_m3s"` to evaluate specified flows in m³/s. These discharge selectors are available only in curves mode and cannot be combined with `full_curve=True`. Use `flow_cols` and `flow_units` for the optional median metric in summary mode. Curve output remains a long table, so repeated reach IDs are not unique join keys. When `normalize_width_col` is supplied, curve output also contains `WUA_normalized = WUA / normalization width`.
 
 The single-reach functions retain their previous default numerical behavior. `avg_hydraulics(..., full_curve=True)` is also available for native hydraulic output, and `integrate_wua_curve(curve)` can integrate a supplied WUA table.
 
@@ -438,6 +456,7 @@ gift-network "C:\path\to\stream_network.gpkg" "C:\path\to\network_wua.csv" `
   --width-col BF_width_m `
   --depth-col BF_depth_m `
   --d84-col D84_mm `
+  --normalize-width-col late_summer_wetted_width_pred_m `
   --depth-curve "C:\path\to\depth_suitability.csv" `
   --velocity-curve "C:\path\to\velocity_suitability.csv" `
   --species chinook `
@@ -483,12 +502,19 @@ All input segment attributes and geometries are retained in the GeoPackage; the 
 | ----- | ----------- | ---- |
 | `WUA_mean` | Arithmetic mean WUA across the full native curve | m²/m |
 | `WUA_max` | Maximum WUA across the full native curve | m²/m |
+| `WUA_dimensionless_mean` | Mean depth × velocity × substrate suitability across the full native curve | Dimensionless |
+| `WUA_dimensionless_max` | Maximum depth × velocity × substrate suitability across the full native curve | Dimensionless |
+| `WUA_mean_normalized` | Mean WUA divided by the selected normalization width | Dimensionless |
+| `WUA_max_normalized` | Maximum WUA divided by the selected normalization width | Dimensionless |
+| `d.suit_mean` | Arithmetic mean depth suitability across the full native curve | Dimensionless |
+| `v.suit_mean` | Arithmetic mean velocity suitability across the full native curve | Dimensionless |
 | `s.suit` | Substrate suitability applied to the reach (1.0 without substrate inputs) | Dimensionless |
 | `WUA_Q_min_m3s` | Minimum modeled discharge | m³/s |
 | `WUA_Q_max_m3s` | Maximum modeled discharge, simulated bankfull flow | m³/s |
 | `WUA_Q_at_max_m3s` | Lowest modeled discharge at which maximum WUA occurs | m³/s |
 | `WUA_Q_count` | Number of native curve points summarized | Count |
 | `WUA by flowrate` | Optional median WUA at the selected flow fields | m²/m |
+| `WUA by flowrate normalized` | Optional median WUA divided by the selected normalization width | Dimensionless |
 | `WUA flow fields` | Optional JSON list of contributing flow field names, in selection order | Text |
 | `WUA flow units` | Optional declared units of the input flow fields | `cfs` or `m3/s` |
 | `WUA flow fields excluded` | Optional JSON mapping of omitted fields to reasons; `{}` if none | Text |
@@ -513,6 +539,7 @@ All input segment attributes and geometries are retained in the GeoPackage; the 
 | `s.suit` | Substrate suitability                      | Dimensionless |
 | `w`      | Wetted width                               | m             |
 | `WUA`    | Weighted usable area per unit reach length | m²/m          |
+| `WUA_normalized` | WUA divided by the selected reach-level normalization width, when requested | Dimensionless |
 
 When `output_dir` is supplied, the single-reach functions also create:
 

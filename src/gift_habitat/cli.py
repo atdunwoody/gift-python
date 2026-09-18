@@ -48,6 +48,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-depth-col")
     parser.add_argument("--shape-factor-col")
     parser.add_argument(
+        "--normalize-width-col",
+        help=(
+            "Reach-level wetted-width field in meters used to add dimensionless "
+            "normalized WUA outputs"
+        ),
+    )
+    parser.add_argument(
         "--discharge-col",
         help="For --curves-csv only: evaluate each reach at this field's flow (m3/s)",
     )
@@ -183,6 +190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         id_col=args.id_col,
         max_depth_col=args.max_depth_col,
         shape_factor_col=args.shape_factor_col,
+        normalize_width_col=args.normalize_width_col,
         substrate_curve=substrate_curve,
         gsd_by_reach=gsd_by_reach,
     )

@@ -23,6 +23,9 @@ SLOPE_FIELD = "SLOPE"
 WIDTH_FIELD = "bf_width_pred_m"
 DEPTH_FIELD = "bf_depth_pred_m"
 D84_FIELD = "D84_pred"
+# Normalize WUA by this reach-level wetted-width prediction. Set to None to
+# omit normalized WUA fields.
+NORMALIZE_WIDTH_FIELD = "late_summer_wetted_width_pred_m"
 MAX_DEPTH_FIELD = None
 SHAPE_FACTOR_FIELD = None
 
@@ -32,18 +35,24 @@ SHAPE_FACTOR_FIELD = None
 BIOLOGICAL_FLOW_FIELDS = []
 BIOLOGICAL_FLOW_UNITS = "cfs"  # Choose "cfs" or "m3/s" for all selected fields.
 
+# Optionally save WUA-versus-discharge plots for selected reaches. Leave empty
+# to skip plots. Plot files are written to OUTPUT_PATH.parent / "plots".
+# Example: PLOT_COMIDS = [2376417, 2376419, 2376421]
+PLOT_COMIDS = [23428544, 23428814, 23428938]
+
 ###############################################################################
 ####################### Optional Inputs Below This Line ########################
 ################################################################################
 PROGRESS_STEP_PERCENT = 5  # Report completed reaches at roughly 5% intervals.
 # Used only if the suitability CSVs contain species/life_stage columns.
-SPECIES = ""
-LIFE_STAGE = ""
+SPECIES = "rainbow"
+LIFE_STAGE = "parr"
 # Optionally set GRAIN_SIZES_PATH to average suitability over the observed
-# grain-size distribution as in the original GIFT R implementation.
+# grain-size distribution as in the original GIFT R implementation. This CSV
+# needs one observation per row, with COMID and grain_size_mm (mm) by default.
 GRAIN_SIZES_PATH = None  # Path(r"C:\path\to\grain_sizes_by_reach.csv")
-GRAIN_ID_FIELD = ""
-GRAIN_SIZE_FIELD = ""
+GRAIN_ID_FIELD = "COMID"
+GRAIN_SIZE_FIELD = "grain_size_mm"
 
 def read_curve(path: Path) -> pd.DataFrame:
     curve = pd.read_csv(path)
@@ -54,6 +63,93 @@ def read_curve(path: Path) -> pd.DataFrame:
     if curve.empty:
         raise ValueError(f"No suitability rows match {SPECIES!r}/{LIFE_STAGE!r}: {path}")
     return curve.reset_index(drop=True)
+
+
+def _safe_filename_token(value: object) -> str:
+    """Convert a reach ID to a filesystem-safe filename token."""
+    token = str(value).strip()
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in token) or "reach"
+
+
+def save_wua_plots(
+    streams: gpd.GeoDataFrame,
+    depth_curve: pd.DataFrame,
+    velocity_curve: pd.DataFrame,
+    *,
+    substrate_curve: pd.DataFrame | None,
+    gsd_by_reach: dict[object, object] | None,
+) -> None:
+    """Save full native WUA-discharge curves for the requested COMIDs."""
+    if not PLOT_COMIDS:
+        return
+
+    if ID_FIELD not in streams.columns:
+        raise ValueError(f"PLOT_COMIDS requires ID_FIELD={ID_FIELD!r} in the network")
+    if len(PLOT_COMIDS) != len(set(PLOT_COMIDS)):
+        raise ValueError("PLOT_COMIDS contains duplicate COMIDs")
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError(
+            'Install plotting support with: python -m pip install -e ".[plot,network]"'
+        ) from exc
+
+    plots_dir = OUTPUT_PATH.parent / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+
+    for requested_id in PLOT_COMIDS:
+        positions = [
+            position for position, value in enumerate(streams[ID_FIELD])
+            if pd.notna(value) and value == requested_id
+        ]
+        if not positions:
+            print(f"Plot COMID {requested_id!r} was not found; skipping.")
+            continue
+
+        for occurrence, position in enumerate(positions, start=1):
+            reach = streams.iloc[[position]].copy()
+            curve = model_reaches(
+                reach,
+                depth_curve,
+                velocity_curve,
+                id_col=ID_FIELD,
+                slope_col=SLOPE_FIELD,
+                width_col=WIDTH_FIELD,
+                depth_col=DEPTH_FIELD,
+                d84_col=D84_FIELD,
+                substrate_curve=substrate_curve,
+                gsd_by_reach=gsd_by_reach,
+                max_depth_col=MAX_DEPTH_FIELD,
+                shape_factor_col=SHAPE_FACTOR_FIELD,
+                output="curves",
+                full_curve=True,
+            )
+            valid = curve[["Q", "WUA"]].dropna()
+            if valid.empty:
+                print(f"Plot COMID {requested_id!r} has null model inputs; skipping.")
+                continue
+
+            figure, axis = plt.subplots(figsize=(7, 5))
+            axis.plot(valid["Q"], valid["WUA"], linewidth=2)
+            axis.set(
+                title=f"COMID {requested_id}",
+                xlabel=r"Discharge ($m^3\,s^{-1}$)",
+                ylabel=r"WUA ($m^2\,m^{-1}$)",
+            )
+            axis.set_xlim(left=0)
+            axis.set_ylim(bottom=0)
+            axis.grid(True, alpha=0.3)
+            figure.tight_layout()
+
+            suffix = f"_{occurrence}" if len(positions) > 1 else ""
+            filename = f"COMID_{_safe_filename_token(requested_id)}{suffix}_WUA_vs_Q.png"
+            figure.savefig(plots_dir / filename, dpi=300)
+            plt.close(figure)
+            saved += 1
+
+    print(f"Wrote {saved:,} WUA-discharge plot(s) to {plots_dir}")
 
 
 def main() -> None:
@@ -72,6 +168,8 @@ def main() -> None:
         raise ValueError("Use output paths that do not overwrite any input file")
     options = {"layer": INPUT_LAYER} if INPUT_LAYER else {}
     streams = gpd.read_file(NETWORK_PATH, **options)
+    depth_curve = read_curve(DEPTH_CURVE_PATH)
+    velocity_curve = read_curve(VELOCITY_CURVE_PATH)
     substrate_curve = (
         read_curve(SUBSTRATE_CURVE_PATH) if SUBSTRATE_CURVE_PATH is not None
         else None
@@ -96,13 +194,14 @@ def main() -> None:
             last_reported_bucket = bucket
     result = model_reaches(
         streams,
-        read_curve(DEPTH_CURVE_PATH),
-        read_curve(VELOCITY_CURVE_PATH),
+        depth_curve,
+        velocity_curve,
         id_col=ID_FIELD,
         slope_col=SLOPE_FIELD,
         width_col=WIDTH_FIELD,
         depth_col=DEPTH_FIELD,
         d84_col=D84_FIELD,
+        normalize_width_col=NORMALIZE_WIDTH_FIELD,
         substrate_curve=substrate_curve,
         gsd_by_reach=gsd_by_reach,
         max_depth_col=MAX_DEPTH_FIELD,
@@ -114,6 +213,13 @@ def main() -> None:
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_file(OUTPUT_PATH, layer=OUTPUT_LAYER, driver="GPKG", index=False)
     result.drop(columns=[result.geometry.name]).to_csv(csv_path, index=False)
+    save_wua_plots(
+        streams,
+        depth_curve,
+        velocity_curve,
+        substrate_curve=substrate_curve,
+        gsd_by_reach=gsd_by_reach,
+    )
     print(f"Wrote {len(result):,} segments to {OUTPUT_PATH}")
     print(f"Wrote segment summary to {csv_path}")
 

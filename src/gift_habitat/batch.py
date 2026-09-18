@@ -18,11 +18,19 @@ CFS_TO_M3S = 0.028316846592
 _SUMMARY_COLUMNS = (
     "WUA_mean",
     "WUA_max",
+    "WUA_dimensionless_mean",
+    "WUA_dimensionless_max",
     "WUA_Q_min_m3s",
     "WUA_Q_max_m3s",
     "WUA_Q_at_max_m3s",
     "WUA_Q_count",
+    "d.suit_mean",
+    "v.suit_mean",
     "s.suit",
+)
+_NORMALIZED_SUMMARY_COLUMNS = (
+    "WUA_mean_normalized",
+    "WUA_max_normalized",
 )
 _LEGACY_SUMMARY_COLUMNS = ("WUA_auc",)
 _FLOW_COLUMNS = (
@@ -31,6 +39,7 @@ _FLOW_COLUMNS = (
     "WUA flow units",
     "WUA flow fields excluded",
 )
+_NORMALIZED_FLOW_COLUMN = "WUA by flowrate normalized"
 
 
 def _missing_model_input(value: object) -> bool:
@@ -220,6 +229,7 @@ def model_reaches(
     id_col: str | None = None,
     max_depth_col: str | None = None,
     shape_factor_col: str | None = None,
+    normalize_width_col: str | None = None,
     flow_cols: Iterable[str] | None = None,
     flow_units: str | None = None,
     output: str = "summary",
@@ -241,14 +251,25 @@ def model_reaches(
     ``WUA_Q_at_max_m3s`` records the lowest modeled discharge at which the
     maximum WUA occurs. ``WUA_mean`` is the arithmetic mean of the native
     modeled WUA values and is not discharge-weighted.
+    ``WUA_dimensionless_mean`` and ``WUA_dimensionless_max`` summarize
+    ``d.suit * v.suit * s.suit`` over the same native discharge curve, without
+    multiplying by wetted width. ``d.suit_mean`` and
+    ``v.suit_mean`` are the arithmetic means of depth and velocity suitability
+    across those same native discharge simulations. If
+    ``normalize_width_col`` is supplied, ``WUA_mean_normalized`` and
+    ``WUA_max_normalized`` divide those metrics by that reach-level wetted
+    width in meters. These normalized values are dimensionless.
 
     Add ``flow_cols=[...]`` and explicitly set ``flow_units='cfs'`` or
     ``'m3/s'`` to also calculate ``WUA by flowrate``: the median of WUA values
     at the selected per-segment flows, in m2/m. Zero flow contributes zero
     WUA. Missing, invalid and unsupported positive flows are excluded and
     recorded with reasons; no usable flows gives NaN. ``WUA flow fields``
-    records the fields actually included as a JSON list. Different fields
-    with identical flows each contribute once. Field names must be unique.
+    records the fields actually included as a JSON list. When
+    ``normalize_width_col`` is also supplied, ``WUA by flowrate normalized``
+    divides the biological-flow WUA metric by the same reach-level width.
+    Different fields with identical flows each contribute once. Field names
+    must be unique.
 
     ``output='curves'`` retains the earlier long table behavior, with one row
     per reach and discharge. Only that mode accepts ``discharges`` or
@@ -307,7 +328,10 @@ def model_reaches(
 
     requested_columns = [slope_col, width_col, depth_col, d84_col]
     requested_columns.extend(
-        name for name in (id_col, max_depth_col, shape_factor_col, discharge_col)
+        name for name in (
+            id_col, max_depth_col, shape_factor_col, discharge_col,
+            normalize_width_col,
+        )
         if name is not None
     )
     missing = sorted(set(requested_columns) - set(reaches.columns))
@@ -323,6 +347,7 @@ def model_reaches(
     summaries: list[dict[str, object]] = []
     excluded_reaches = 0
     skipped_reaches = 0
+    invalid_normalization_widths = 0
     total_reaches = len(reaches)
     for position, (index, reach) in enumerate(reaches.iterrows()):
         # Access the original column to preserve integer IDs without iterrows
@@ -335,15 +360,23 @@ def model_reaches(
         )):
             skipped_reaches += 1
             if output == "curves":
-                outputs.append(pd.DataFrame([{
+                null_curve = {
                     "reach_id": reach_id, "Q": np.nan, "d.suit": np.nan,
                     "v.suit": np.nan, "s.suit": np.nan, "w": np.nan,
                     "WUA": np.nan,
-                }]))
+                }
+                if normalize_width_col is not None:
+                    null_curve["WUA_normalized"] = np.nan
+                outputs.append(pd.DataFrame([null_curve]))
             else:
-                summaries.append({column: None for column in (
-                    *_SUMMARY_COLUMNS, *(_FLOW_COLUMNS if fields else ()),
-                )})
+                null_columns = [
+                    *_SUMMARY_COLUMNS,
+                    *(_NORMALIZED_SUMMARY_COLUMNS if normalize_width_col is not None else ()),
+                    *(_FLOW_COLUMNS if fields else ()),
+                ]
+                if fields and normalize_width_col is not None:
+                    null_columns.append(_NORMALIZED_FLOW_COLUMN)
+                summaries.append({column: None for column in null_columns})
             if progress_callback is not None:
                 progress_callback(position + 1, total_reaches)
             continue
@@ -391,6 +424,16 @@ def model_reaches(
             substrate_size_mm,
         )
         if output == "curves":
+            if normalize_width_col is not None:
+                try:
+                    normalization_width = float(reach[normalize_width_col])
+                except (TypeError, ValueError):
+                    normalization_width = np.nan
+                if np.isfinite(normalization_width) and normalization_width > 0:
+                    curve["WUA_normalized"] = curve["WUA"] / normalization_width
+                else:
+                    curve["WUA_normalized"] = np.nan
+                    invalid_normalization_widths += 1
             curve.insert(0, "reach_id", reach_id)
             outputs.append(curve)
             if progress_callback is not None:
@@ -398,6 +441,11 @@ def model_reaches(
             continue
 
         wua = curve["WUA"].to_numpy(dtype=float)
+        dimensionless_wua = (
+            curve["d.suit"].to_numpy(dtype=float)
+            * curve["v.suit"].to_numpy(dtype=float)
+            * curve["s.suit"].to_numpy(dtype=float)
+        )
         q = curve["Q"].to_numpy(dtype=float)
         max_wua = float(np.max(wua))
         # Curves are ordered by increasing discharge. In the event of an exact
@@ -406,18 +454,42 @@ def model_reaches(
         summary = {
             "WUA_mean": float(np.mean(wua)),
             "WUA_max": max_wua,
+            "WUA_dimensionless_mean": float(np.mean(dimensionless_wua)),
+            "WUA_dimensionless_max": float(np.max(dimensionless_wua)),
             "WUA_Q_min_m3s": float(np.min(q)),
             "WUA_Q_max_m3s": float(np.max(q)),
             "WUA_Q_at_max_m3s": q_at_max,
             "WUA_Q_count": len(curve),
+            "d.suit_mean": float(curve["d.suit"].mean()),
+            "v.suit_mean": float(curve["v.suit"].mean()),
             "s.suit": float(curve["s.suit"].iloc[0]),
         }
+        normalization_width = None
+        if normalize_width_col is not None:
+            try:
+                candidate_width = float(reach[normalize_width_col])
+            except (TypeError, ValueError):
+                candidate_width = np.nan
+            if np.isfinite(candidate_width) and candidate_width > 0:
+                normalization_width = candidate_width
+                summary["WUA_mean_normalized"] = summary["WUA_mean"] / candidate_width
+                summary["WUA_max_normalized"] = summary["WUA_max"] / candidate_width
+            else:
+                summary["WUA_mean_normalized"] = np.nan
+                summary["WUA_max_normalized"] = np.nan
+                invalid_normalization_widths += 1
         if fields:
             summary.update(_flow_summary(
                 reach, fields, flow_units, hydraulics,
                 depth_curve, velocity_curve, substrate_curve, reach_gsd,
                 substrate_size_mm,
             ))
+            if normalize_width_col is not None:
+                summary[_NORMALIZED_FLOW_COLUMN] = (
+                    summary["WUA by flowrate"] / normalization_width
+                    if normalization_width is not None
+                    else np.nan
+                )
             excluded_reaches += summary["WUA flow fields excluded"] != "{}"
         summaries.append(summary)
         if progress_callback is not None:
@@ -433,9 +505,20 @@ def model_reaches(
 
     if output == "curves":
         if not outputs:
-            return pd.DataFrame(columns=[
+            columns = [
                 "reach_id", "Q", "d.suit", "v.suit", "s.suit", "w", "WUA",
-            ])
+            ]
+            if normalize_width_col is not None:
+                columns.append("WUA_normalized")
+            return pd.DataFrame(columns=columns)
+        if invalid_normalization_widths:
+            warnings.warn(
+                f"{invalid_normalization_widths} segment(s) have missing, non-finite, "
+                "or nonpositive normalization widths; normalized WUA is null for "
+                "those segments.",
+                UserWarning,
+                stacklevel=2,
+            )
         return pd.concat(outputs, ignore_index=True)
 
     # Preserve repeated IDs and duplicate index labels without fan-out.
@@ -445,8 +528,20 @@ def model_reaches(
     result = result.drop(columns=list(_LEGACY_SUMMARY_COLUMNS), errors="ignore")
     # Remove optional metrics from a prior run when the option is disabled.
     if not fields:
-        result = result.drop(columns=list(_FLOW_COLUMNS), errors="ignore")
-    for column in (*_SUMMARY_COLUMNS, *(_FLOW_COLUMNS if fields else ())):
+        result = result.drop(columns=[*_FLOW_COLUMNS, _NORMALIZED_FLOW_COLUMN], errors="ignore")
+    if normalize_width_col is None:
+        result = result.drop(
+            columns=[*_NORMALIZED_SUMMARY_COLUMNS, _NORMALIZED_FLOW_COLUMN],
+            errors="ignore",
+        )
+    output_columns = [
+        *_SUMMARY_COLUMNS,
+        *(_NORMALIZED_SUMMARY_COLUMNS if normalize_width_col is not None else ()),
+        *(_FLOW_COLUMNS if fields else ()),
+    ]
+    if fields and normalize_width_col is not None:
+        output_columns.append(_NORMALIZED_FLOW_COLUMN)
+    for column in output_columns:
         values = [summary[column] for summary in summaries]
         if column == "WUA_Q_count":
             result[column] = pd.array(values, dtype="Int64")
@@ -454,6 +549,14 @@ def model_reaches(
             result[column] = np.asarray(values, dtype=object)
         else:
             result[column] = np.asarray(values, dtype=float)
+    if invalid_normalization_widths:
+        warnings.warn(
+            f"{invalid_normalization_widths} segment(s) have missing, non-finite, "
+            "or nonpositive normalization widths; normalized WUA is null for "
+            "those segments.",
+            UserWarning,
+            stacklevel=2,
+        )
     if excluded_reaches:
         warnings.warn(
             f"{excluded_reaches} segment(s) excluded one or more selected flows. "
