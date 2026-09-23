@@ -26,7 +26,7 @@ D84_FIELD = "D84_pred"
 # Normalize WUA by this reach-level wetted-width prediction. Set to None to
 # omit normalized WUA fields.
 NORMALIZE_WIDTH_FIELD = "late_summer_wetted_width_pred_m"
-MAX_DEPTH_FIELD = None
+MAX_DEPTH_FIELD = "bf_depth_max_pred_m"
 SHAPE_FACTOR_FIELD = None
 
 # Mean and maximum WUA are always calculated over the full simulated curve.
@@ -210,6 +210,10 @@ def main() -> None:
         flow_units=BIOLOGICAL_FLOW_UNITS if BIOLOGICAL_FLOW_FIELDS else None,
         progress_callback=report_progress,
     )
+    exceedances = result.attrs["shape_factor_exceedances"]
+    print(f"Shape factor exceedances (>0.7): {len(exceedances):,}")
+    for comid, raw_factor in exceedances:
+        print(f"  COMID {comid}: {raw_factor:.4f} capped to 0.7")
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_file(OUTPUT_PATH, layer=OUTPUT_LAYER, driver="GPKG", index=False)
     result.drop(columns=[result.geometry.name]).to_csv(csv_path, index=False)

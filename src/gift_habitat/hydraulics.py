@@ -97,13 +97,10 @@ def _shape_factor(
         # original user guide omits the divisor of 100.
         result = (bankfull_width / bankfull_depth) / 100.0
 
+    if not np.isfinite(result):
+        raise ValueError("shape_factor must be finite")
     if result < 0:
         raise ValueError("shape_factor must be greater than or equal to zero")
-    if result > 0.7:
-        raise ValueError(
-            "shape_factor exceeds 0.7; the original model identifies this "
-            "range as unrealistic"
-        )
     return result
 
 
@@ -281,7 +278,9 @@ def avg_hydraulics(
         Optional reach-averaged maximum bankfull depth in m.
     shape_factor
         Optional user-specified channel shape factor. This overrides
-        ``max_bankfull_depth`` when both are supplied.
+        ``max_bankfull_depth`` when both are supplied. Calculated or supplied
+        factors above 0.7 are capped at 0.7. The original factor and whether
+        it was capped are available in the returned DataFrame's ``attrs``.
     discharges
         Optional positive discharge value or values in m3/s. The original
         GIFT discharge grid is used when omitted. Values outside the simulated
@@ -352,12 +351,13 @@ def avg_hydraulics(
                 "bankfull_depth must not exceed max_bankfull_depth"
             )
 
-    resolved_shape_factor = _shape_factor(
+    raw_shape_factor = _shape_factor(
         bankfull_width,
         bankfull_depth,
         max_bankfull_depth,
         shape_factor,
     )
+    resolved_shape_factor = min(raw_shape_factor, 0.7)
     simulated = _simulate_water_levels(
         slope,
         bankfull_width,
@@ -382,6 +382,8 @@ def avg_hydraulics(
     result.attrs.update(
         {
             "shape_factor": resolved_shape_factor,
+            "shape_factor_raw": raw_shape_factor,
+            "shape_factor_capped": raw_shape_factor > 0.7,
             "simulated_max_depth_m": max_depth,
             "simulated_min_discharge_m3s": float(simulated["Q"].min()),
             "simulated_bankfull_discharge_m3s": float(simulated["Q"].iloc[-1]),
@@ -397,4 +399,3 @@ def avg_hydraulics(
         )
 
     return result
-

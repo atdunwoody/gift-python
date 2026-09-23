@@ -199,6 +199,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         flow_cols=args.flow_cols, flow_units=args.flow_units,
         **model_options,
     )
+    exceedances = result.attrs["shape_factor_exceedances"]
+    print(f"Shape factor exceedances (>0.7): {len(exceedances):,}")
+    for reach_id, raw_factor in exceedances:
+        print(f"  {args.id_col} {reach_id}: {raw_factor:.4f} capped to 0.7")
     curves = None
     if args.curves_csv is not None:
         curves = model_reaches(
@@ -222,4 +226,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

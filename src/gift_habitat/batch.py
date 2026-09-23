@@ -16,6 +16,8 @@ from .hydraulics import _approx_like_r, avg_hydraulics
 
 CFS_TO_M3S = 0.028316846592
 _SUMMARY_COLUMNS = (
+    "GIFT_shape_factor_raw",
+    "GIFT_shape_factor_used",
     "WUA_mean",
     "WUA_max",
     "HSI_mean",
@@ -277,6 +279,12 @@ def model_reaches(
     ``WUA_max_normalized`` divide those metrics by that reach-level wetted
     width in meters. These normalized values are dimensionless.
 
+    Shape factors greater than 0.7 are capped at 0.7. In summary mode,
+    ``GIFT_shape_factor_raw`` and ``GIFT_shape_factor_used`` record the
+    uncapped and modeled values. In both modes, ``result.attrs`` contains
+    ``shape_factor_exceedances`` as (reach ID, raw factor) pairs in input
+    order, including repeated IDs, and ``shape_factor_exceedance_count``.
+
     Add ``flow_cols=[...]`` and explicitly set ``flow_units='cfs'`` or
     ``'m3/s'`` to also calculate ``WUA by flowrate``: the median of WUA values
     at the selected per-segment flows, in m2/m. Zero flow contributes zero
@@ -365,6 +373,7 @@ def model_reaches(
     excluded_reaches = 0
     skipped_reaches = 0
     invalid_normalization_widths = 0
+    shape_factor_exceedances: list[tuple[object, float]] = []
     total_reaches = len(reaches)
     for position, (index, reach) in enumerate(reaches.iterrows()):
         # Access the original column to preserve integer IDs without iterrows
@@ -439,6 +448,10 @@ def model_reaches(
                 f"No requested discharge falls within the simulated range "
                 f"for reach {reach_id!r}"
             )
+        if hydraulics.attrs["shape_factor_capped"]:
+            shape_factor_exceedances.append(
+                (reach_id, float(hydraulics.attrs["shape_factor_raw"]))
+            )
         curve = _habitat_at_flows(
             hydraulics, depth_curve, velocity_curve, substrate_curve, reach_gsd,
             substrate_size_mm,
@@ -483,6 +496,8 @@ def model_reaches(
         depth = hydraulics["di"].to_numpy(dtype=float)
         velocity = hydraulics["Ui"].to_numpy(dtype=float)
         summary = {
+            "GIFT_shape_factor_raw": hydraulics.attrs["shape_factor_raw"],
+            "GIFT_shape_factor_used": hydraulics.attrs["shape_factor"],
             "WUA_mean": float(np.mean(wua)),
             "WUA_max": max_wua,
             "HSI_mean": float(np.mean(hsi)),
@@ -552,7 +567,10 @@ def model_reaches(
             ]
             if normalize_width_col is not None:
                 columns.append("WUA_normalized")
-            return pd.DataFrame(columns=columns)
+            result = pd.DataFrame(columns=columns)
+            result.attrs["shape_factor_exceedances"] = shape_factor_exceedances
+            result.attrs["shape_factor_exceedance_count"] = 0
+            return result
         if invalid_normalization_widths:
             warnings.warn(
                 f"{invalid_normalization_widths} segment(s) have missing, non-finite, "
@@ -561,7 +579,10 @@ def model_reaches(
                 UserWarning,
                 stacklevel=2,
             )
-        return pd.concat(outputs, ignore_index=True)
+        result = pd.concat(outputs, ignore_index=True)
+        result.attrs["shape_factor_exceedances"] = shape_factor_exceedances
+        result.attrs["shape_factor_exceedance_count"] = len(shape_factor_exceedances)
+        return result
 
     # Preserve repeated IDs and duplicate index labels without fan-out.
     result = reaches.copy()
@@ -607,4 +628,6 @@ def model_reaches(
             UserWarning,
             stacklevel=2,
         )
+    result.attrs["shape_factor_exceedances"] = shape_factor_exceedances
+    result.attrs["shape_factor_exceedance_count"] = len(shape_factor_exceedances)
     return result

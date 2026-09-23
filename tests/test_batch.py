@@ -9,6 +9,42 @@ from gift_habitat import group_grain_sizes, load_example_curve, model_reaches
 
 
 class BatchTests(unittest.TestCase):
+    def test_reports_capped_shape_factors_by_comid_and_preserves_rows(self) -> None:
+        reaches = pd.DataFrame({
+            "COMID": [23428532, 23428532, 42, 43],
+            "slope": [0.01] * 4,
+            "width_m": [10.0] * 4,
+            "depth_m": [0.5, 0.5, 0.5, np.nan],
+            "d84_mm": [100.0] * 4,
+            "factor": [0.8, 0.75, 0.7, 0.9],
+        })
+        depth = load_example_curve("depth", species="rainbow", life_stage="parr")
+        velocity = load_example_curve("velocity", species="rainbow", life_stage="parr")
+        options = dict(
+            slope_col="slope", width_col="width_m", depth_col="depth_m",
+            d84_col="d84_mm", id_col="COMID", shape_factor_col="factor",
+        )
+        result = model_reaches(reaches, depth, velocity, **options)
+        self.assertEqual(result["COMID"].tolist(), reaches["COMID"].tolist())
+        self.assertEqual(result.attrs["shape_factor_exceedance_count"], 2)
+        self.assertEqual(result.attrs["shape_factor_exceedances"], [
+            (23428532, 0.8), (23428532, 0.75),
+        ])
+        np.testing.assert_allclose(
+            result["GIFT_shape_factor_raw"].iloc[:3], [0.8, 0.75, 0.7],
+        )
+        np.testing.assert_allclose(
+            result["GIFT_shape_factor_used"].iloc[:3], [0.7, 0.7, 0.7],
+        )
+        self.assertTrue(np.isnan(result["GIFT_shape_factor_used"].iloc[3]))
+        self.assertTrue(np.isfinite(result["WUA_mean"].iloc[:3]).all())
+
+        curves = model_reaches(
+            reaches.iloc[:2], depth, velocity,
+            output="curves", discharges=[0.001], **options,
+        )
+        self.assertEqual(curves.attrs["shape_factor_exceedance_count"], 2)
+
     def test_reach_specific_substrate_scales_full_and_selected_flow_wua(self) -> None:
         reaches = pd.DataFrame({
             "COMID": [101, 102], "slope": [0.01, 0.01],
@@ -143,4 +179,3 @@ class BatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -165,6 +165,12 @@ hydraulics = avg_hydraulics(
 ```
 
 The model will derive the channel-shape factor from the bankfull width-to-depth ratio.
+Shape factors above 0.7, whether derived or supplied, are capped at 0.7.
+`avg_hydraulics` records the original value as `hydraulics.attrs["shape_factor_raw"]`
+and the value used as `hydraulics.attrs["shape_factor"]`. Network summaries
+retain both values in `GIFT_shape_factor_raw` and `GIFT_shape_factor_used`.
+`examples/stream_network.py` prints the total number of capped segments and
+their COMIDs with original factors.
 
 ### Model selected discharges
 

@@ -68,9 +68,22 @@ class AvgHydraulicsTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(result["Q"], [0.0025, 0.0045])
 
-    def test_rejects_unrealistic_shape_factor(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exceeds 0.7"):
-            avg_hydraulics(0.01, 10, 0.5, 100, shape_factor=0.8)
+    def test_caps_explicit_and_derived_shape_factors(self) -> None:
+        cases = (
+            (10, dict(shape_factor=0.8), 0.8),
+            (10, dict(max_bankfull_depth=2.0), 0.75),
+            (40, {}, 0.8),
+        )
+        for width, options, raw in cases:
+            with self.subTest(options=options):
+                result = avg_hydraulics(0.01, width, 0.5, 100, **options)
+                reference = avg_hydraulics(
+                    0.01, width, 0.5, 100, shape_factor=0.7,
+                )
+                self.assertAlmostEqual(result.attrs["shape_factor_raw"], raw)
+                self.assertEqual(result.attrs["shape_factor"], 0.7)
+                self.assertTrue(result.attrs["shape_factor_capped"])
+                np.testing.assert_allclose(result.to_numpy(), reference.to_numpy())
 
 
 if __name__ == "__main__":
