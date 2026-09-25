@@ -1,6 +1,8 @@
 """Edit the settings below, then run this script to attribute a stream network."""
 
 from pathlib import Path
+import math
+from numbers import Real
 
 import geopandas as gpd
 import pandas as pd
@@ -9,13 +11,16 @@ from gift_habitat import group_grain_sizes, model_reaches
 
 
 # Input and output paths. Use a separate output GeoPackage.
-NETWORK_PATH = Path(r"examples\inputs\UGR_channel_geometry_predictions.gpkg")
+ROOT = Path(__file__).resolve().parents[1]
+NETWORK_PATH = ROOT / "examples/Inputs/UGR_channel_geometry_predictions.gpkg"
 INPUT_LAYER = None  # Set a layer name if the GeoPackage contains several layers.
-OUTPUT_PATH = Path(r"examples\outputs\gift_network_results.gpkg")
+OUTPUT_PATH = ROOT / "examples/outputs/gift_network_results.gpkg"
 OUTPUT_LAYER = "gift_wua"
-DEPTH_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_depth.csv")
-VELOCITY_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_velocity.csv")
-SUBSTRATE_CURVE_PATH = Path(r"examples\inputs\chinook_juvenile_rearing_substrate.csv")  # Path(r"C:\path\to\substrate_suitability.csv")
+DEPTH_CURVE_PATH = ROOT / "examples/Inputs/chinook_juvenile_rearing_depth.csv"
+VELOCITY_CURVE_PATH = ROOT / "examples/Inputs/chinook_juvenile_rearing_velocity.csv"
+SUBSTRATE_CURVE_PATH = ROOT / "examples/Inputs/chinook_juvenile_rearing_substrate.csv"
+# To plot the generalized salmonid scenario, set all three paths to
+# ROOT / "examples/Inputs/salmonid_general_sensitivity_<kind>.csv".
 
 # Hydraulic fields: width/depth in meters, slope in m/m or ft/ft, D84 in mm.
 ID_FIELD = "COMID"
@@ -35,8 +40,8 @@ SHAPE_FACTOR_FIELD = None
 BIOLOGICAL_FLOW_FIELDS = []
 BIOLOGICAL_FLOW_UNITS = "cfs"  # Choose "cfs" or "m3/s" for all selected fields.
 
-# Optionally save WUA-versus-discharge plots for selected reaches. Leave empty
-# to skip plots. Plot files are written to OUTPUT_PATH.parent / "plots".
+# Optionally save WUA, HSI, depth suitability, and velocity suitability curves
+# for selected reaches. Leave empty to skip; files go in OUTPUT_PATH.parent / "plots".
 # Example: PLOT_COMIDS = [2376417, 2376419, 2376421]
 PLOT_COMIDS = [23428544, 23428814, 23428938]
 
@@ -71,7 +76,35 @@ def _safe_filename_token(value: object) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in token) or "reach"
 
 
-def save_wua_plots(
+def _reach_plot_title(reach: pd.Series) -> str:
+    """Identify an individual reach even when several share a stream name."""
+    name = reach.get("GNIS_NAME")
+    if not isinstance(name, str) or not name.strip():
+        name = "Unnamed stream"
+    comid = reach[ID_FIELD]
+    comid_text = (
+        str(int(comid))
+        if isinstance(comid, Real) and math.isfinite(comid)
+        and float(comid).is_integer()
+        else str(comid)
+    )
+    return f"{name.strip()} (COMID: {comid_text})"
+
+
+def _substrate_note(curve: pd.DataFrame) -> str:
+    score = float(curve["s.suit"].mean())
+    return f"Substrate suitability: {score:.3f}" if math.isfinite(score) else "Substrate suitability: N/A"
+
+
+def _shared_primary_limits(curves: list[pd.DataFrame]) -> dict[str, float]:
+    """Use one WUA limit and one HSI limit for all selected reaches."""
+    return {
+        field: max(1.08 * max(float(curve[field].max()) for curve in curves), 0.01)
+        for field in ("WUA", "HSI")
+    }
+
+
+def save_reach_plots(
     streams: gpd.GeoDataFrame,
     depth_curve: pd.DataFrame,
     velocity_curve: pd.DataFrame,
@@ -79,7 +112,7 @@ def save_wua_plots(
     substrate_curve: pd.DataFrame | None,
     gsd_by_reach: dict[object, object] | None,
 ) -> None:
-    """Save full native WUA-discharge curves for the requested COMIDs."""
+    """Save comparable full-curve figures for the requested COMIDs."""
     if not PLOT_COMIDS:
         return
 
@@ -97,7 +130,7 @@ def save_wua_plots(
 
     plots_dir = OUTPUT_PATH.parent / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    saved = 0
+    selected = []
 
     for requested_id in PLOT_COMIDS:
         positions = [
@@ -126,30 +159,61 @@ def save_wua_plots(
                 output="curves",
                 full_curve=True,
             )
-            valid = curve[["Q", "WUA"]].dropna()
+            valid = curve.dropna(subset=["Q", "WUA", "HSI", "d.suit", "v.suit"])
             if valid.empty:
                 print(f"Plot COMID {requested_id!r} has null model inputs; skipping.")
                 continue
-
-            figure, axis = plt.subplots(figsize=(7, 5))
-            axis.plot(valid["Q"], valid["WUA"], linewidth=2)
-            axis.set(
-                title=f"COMID {requested_id}",
-                xlabel=r"Discharge ($m^3\,s^{-1}$)",
-                ylabel=r"WUA ($m^2\,m^{-1}$)",
-            )
-            axis.set_xlim(left=0)
-            axis.set_ylim(bottom=0)
-            axis.grid(True, alpha=0.3)
-            figure.tight_layout()
-
             suffix = f"_{occurrence}" if len(positions) > 1 else ""
-            filename = f"COMID_{_safe_filename_token(requested_id)}{suffix}_WUA_vs_Q.png"
-            figure.savefig(plots_dir / filename, dpi=300)
+            prefix = f"COMID_{_safe_filename_token(requested_id)}{suffix}"
+            selected.append((prefix, _reach_plot_title(reach.iloc[0]), valid))
+
+    if not selected:
+        print(f"Wrote 0 reach plots to {plots_dir}")
+        return
+
+    shared_limits = _shared_primary_limits([curve for _, _, curve in selected])
+    plot_specs = (
+        ("WUA_vs_Q", "WUA", r"WUA ($m^2\,m^{-1}$)", "#173f63"),
+        ("HSI_vs_Q", "HSI", "HSI (0–1)", "#654280"),
+        ("depth_suitability_vs_Q", "d.suit", "Depth suitability (0–1)", "#368eae"),
+        ("velocity_suitability_vs_Q", "v.suit", "Velocity suitability (0–1)", "#c4752d"),
+    )
+    saved = 0
+    for prefix, title, curve in selected:
+        for file_suffix, field, y_label, color in plot_specs:
+            figure, axis = plt.subplots(figsize=(9.2, 5.5))
+            figure.subplots_adjust(left=0.11, right=0.86, bottom=0.15, top=0.77)
+            figure.suptitle(title, y=0.98, fontsize=14)
+            figure.text(0.5, 0.90, _substrate_note(curve), ha="center",
+                        va="center", fontsize=9, color="#444444")
+            primary, = axis.plot(curve["Q"], curve[field], color=color,
+                                 linewidth=2.6 if field in shared_limits else 2.0)
+            axis.set(xlabel=r"Discharge ($m^3\,s^{-1}$)", ylabel=y_label)
+            axis.set_xlim(left=0)
+            axis.set_ylim(0, shared_limits[field] if field in shared_limits else 1.02)
+            axis.grid(True, alpha=0.25)
+
+            if field in shared_limits:
+                secondary = axis.twinx()
+                depth, = secondary.plot(curve["Q"], curve["d.suit"],
+                                        color="#3299ac", linewidth=1.15,
+                                        alpha=0.50, linestyle="--")
+                velocity, = secondary.plot(curve["Q"], curve["v.suit"],
+                                           color="#d1792d", linewidth=1.15,
+                                           alpha=0.50, linestyle=":")
+                secondary.set(ylabel="Suitability (0–1)", ylim=(0, 1.02))
+                axis.set_zorder(secondary.get_zorder() + 1)
+                axis.patch.set_visible(False)
+                figure.legend((primary, depth, velocity),
+                              (field, "Depth suitability", "Velocity suitability"),
+                              loc="upper center", bbox_to_anchor=(0.5, 0.86),
+                              ncol=3, frameon=False, fontsize=9)
+
+            figure.savefig(plots_dir / f"{prefix}_{file_suffix}.png", dpi=300)
             plt.close(figure)
             saved += 1
 
-    print(f"Wrote {saved:,} WUA-discharge plot(s) to {plots_dir}")
+    print(f"Wrote {saved:,} reach plot(s) to {plots_dir}")
 
 
 def main() -> None:
@@ -217,7 +281,7 @@ def main() -> None:
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_file(OUTPUT_PATH, layer=OUTPUT_LAYER, driver="GPKG", index=False)
     result.drop(columns=[result.geometry.name]).to_csv(csv_path, index=False)
-    save_wua_plots(
+    save_reach_plots(
         streams,
         depth_curve,
         velocity_curve,

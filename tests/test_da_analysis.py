@@ -62,6 +62,64 @@ class DrainageAreaAnalysisTests(unittest.TestCase):
         self.assertEqual(result.loc[result["largest_aligned_contributor"], "component"].iloc[0], "depth")
         self.assertAlmostEqual(result["share_of_HSI_mean_slope_pct"].sum(), 100)
 
+    def test_width_adjustment_aligns_duplicate_ids_by_position(self):
+        reaches = pd.DataFrame({
+            analysis.ID_FIELD: [101, 101],
+            analysis.WIDTH_FIELD: [2.0, 4.0],
+            analysis.DEPTH_FIELD: [0.2, 0.4],
+            analysis.SLOPE_FIELD: [0.02, 0.01],
+            analysis.SUMMER_WIDTH_FIELD: [1.0, 0.0],
+        })
+        modeled = pd.DataFrame({
+            "group": ["juvenile", "juvenile", "spawning", "spawning"],
+            analysis.ID_FIELD: [101] * 4,
+            "WUA_mean": [2.0, 8.0, 4.0, 16.0],
+        })
+        result = analysis.add_driver_columns(modeled, reaches,
+                                             ["juvenile", "spawning"])
+        np.testing.assert_allclose(result["WUA_per_bankfull_width"],
+                                   [1.0, 2.0, 2.0, 4.0])
+        np.testing.assert_allclose(result["WUA_per_summer_width"].iloc[[0, 2]],
+                                   [2.0, 4.0])
+        self.assertTrue(result["WUA_per_summer_width"].iloc[[1, 3]].isna().all())
+        with self.assertRaisesRegex(ValueError, "do not align"):
+            analysis.add_driver_columns(modeled.iloc[:-1], reaches,
+                                        ["juvenile", "spawning"])
+
+    def test_general_salmonid_curves_have_expected_sources_and_boundaries(self):
+        curves = analysis.general_salmonid_curves()
+        self.assertIn(analysis.GENERAL_GROUP, analysis.curve_groups(analysis.CURVES_DIR))
+        self.assertEqual(len(curves["depth"]), 41)
+        self.assertEqual(len(curves["velocity"]), 41)
+        for kind in ("depth", "velocity"):
+            source = pd.read_csv(
+                analysis.ROOT / f"src/gift_habitat/data/{kind}_suit_ptolemy.csv"
+            )
+            expected = source.loc[
+                source["species"].eq("salmonid")
+                & source["life_stage"].eq("general"), [kind, "suit"],
+            ].reset_index(drop=True)
+            pd.testing.assert_frame_equal(curves[kind], expected)
+        self.assertAlmostEqual(
+            curves["depth"].loc[curves["depth"]["suit"].idxmax(), "depth"],
+            0.65,
+        )
+        self.assertAlmostEqual(
+            curves["velocity"].loc[curves["velocity"]["suit"].idxmax(), "velocity"],
+            0.30,
+        )
+        substrate = curves["substrate"]
+        np.testing.assert_allclose(substrate["lower"].iloc[1:],
+                                   substrate["upper"].iloc[:-1])
+        for grain_size, score in ((5.0, 0.1), (30.0, 0.3),
+                                  (100.0, 0.5), (200.0, 0.7)):
+            matched = substrate.loc[
+                (substrate["lower"] <= grain_size)
+                & (grain_size < substrate["upper"])
+            ]
+            self.assertEqual(len(matched), 1)
+            self.assertAlmostEqual(float(matched["suit"].iloc[0]), score)
+
 
 if __name__ == "__main__":
     unittest.main()

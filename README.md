@@ -332,7 +332,20 @@ used when one grain-size distribution should apply to all reaches.
 
 For a script with editable settings, use `examples/stream_network.py`. Set the input paths and hydraulic field names. Leave `BIOLOGICAL_FLOW_FIELDS = []` to report only the full-curve mean and maximum WUA statistics. To add the biological-flow metric, populate that list and set `BIOLOGICAL_FLOW_UNITS` to `"cfs"` or `"m3/s"`.
 
-To save WUA-versus-discharge plots for selected reaches, populate `PLOT_COMIDS`, for example `PLOT_COMIDS = [23429054, 23428950]`. Each requested reach is rerun using the full native discharge curve used for the summary statistics, and a 300-dpi PNG is written to the `plots` folder beside the network output, such as `outputs/plots/COMID_23429054_WUA_vs_Q.png`. Leave `PLOT_COMIDS = []` to disable plotting. Requested COMIDs that are not present are reported and skipped; reaches with null model inputs do not produce a plot.
+To save reach plots, populate `PLOT_COMIDS`, for example
+`PLOT_COMIDS = [23429054, 23428950]`. Each requested reach is rerun using its
+full native discharge curve. Four 300-dpi PNGs per reach are written to
+`examples/outputs/plots`: `COMID_<id>_WUA_vs_Q.png`,
+`COMID_<id>_HSI_vs_Q.png`, `COMID_<id>_depth_suitability_vs_Q.png`, and
+`COMID_<id>_velocity_suitability_vs_Q.png`. WUA and HSI each show lighter,
+thinner depth and velocity suitability curves on a secondary 0–1 axis. Each
+figure is titled `GNIS_NAME (COMID: <id>)` and lists substrate suitability
+above the plotting area. All selected reaches share one WUA y-axis limit and
+one HSI y-axis limit, calculated separately for each metric from the maximum
+value among the selected reaches. The two single-component figures use a 0–1
+scale. Leave `PLOT_COMIDS = []` to disable plotting.
+Requested COMIDs that are not present are reported and skipped; reaches with
+null model inputs do not produce plots.
 
 If a mapped hydraulic value is missing or non-finite, the feature remains in the output with null model metrics. A summary warning gives the number skipped. The example reports percentage progress every 5% (configurable with `PROGRESS_STEP_PERCENT`). API callers can pass `progress_callback`, which receives `(processed_reaches, total_reaches)` after each feature.
 
@@ -549,18 +562,20 @@ these new fields, consistent with the other modeled outputs.
 Install the analysis dependencies with `python -m pip install -e ".[analysis]"`
 in the active environment, then run
 `examples/hsi_vs_drainage_area.py` in VSCode. Its editable settings
-point to the included Upper Grande Ronde channel network and to all five complete
-metric suitability curve groups in `examples/Inputs`. Generic
-salmon curves are excluded. It reads `TotDASqKm` (km²) and the same width,
-depth, slope, and D84 fields as `examples/stream_network.py`. Each group uses
+point to the included Upper Grande Ronde channel network, the five complete
+species and life-stage curve groups in `examples/Inputs`, and a sixth general
+salmonid sensitivity scenario whose three CSVs are also in `examples/Inputs`.
+Incomplete `generic_salmon*` input curves, if present, are excluded. It reads
+`TotDASqKm` (km²) and the same width, depth, slope, and D84 fields as
+`examples/stream_network.py`. Each group uses
 its matching depth, velocity, and substrate curves; D84 selects the substrate
 class. Set `DA_FIELD` to another drainage-area attribute if appropriate.
 
-The script writes per-reach HSI, cube-root HSI, and WUA; a 15-row test table
-(five groups × `HSI_mean`, `HSI_max`, and `WUA_mean`); DA-bin medians; and
+The script writes per-reach HSI, cube-root HSI, and WUA; an 18-row test table
+(six groups × `HSI_mean`, `HSI_max`, and `WUA_mean`); DA-bin medians; and
 scatter figures colored by mean depth suitability to
 `examples/outputs/hsi_vs_drainage_area`. The test table reports Spearman's
-rank correlation, Benjamini-Hochberg-adjusted p values across the 15 tests,
+rank correlation, Benjamini-Hochberg-adjusted p values across the 18 tests,
 and the slope per tenfold increase in drainage area. Zero values are retained.
 The component attribution table and bar plot decompose the `HSI_mean` slope
 into additive depth, velocity, and substrate slopes using Shapley values.
@@ -568,6 +583,88 @@ Shares may exceed 100% when components oppose one another. These are descriptive
 associations across reaches: geometry and D84 can covary with drainage area, and
 neighboring reaches are spatially related. P values do not account for spatial
 dependence, and component contributions do not establish causal effects.
+
+Three further figures diagnose this particular drainage-area relationship:
+
+- `DA_hydraulic_drivers.png` compares drainage area with predicted bankfull
+  width and depth, channel slope, D84, and simulated mean depth and velocity.
+  Each panel has a labeled y-axis and reports a Spearman correlation and
+  drainage-area quintile medians in light grey.
+- `DA_suitability_components.png` shows median depth, velocity, and substrate
+  suitability separately for each species and life stage in a 3×2 layout. The
+  product of their individual means is generally **not** `HSI_mean`, which
+  averages their product at each native simulated water level.
+- `DA_WUA_width_adjustment.png` shows `WUA_mean` divided by predicted bankfull
+  width and, when `SUMMER_WIDTH_FIELD` is set, by predicted late-summer wetted
+  width. The ratios are dimensionless scaling diagnostics, not independent
+  habitat indices or measures of habitat at a common discharge.
+
+The enlarged per-reach CSV and quintile summary include the hydraulic drivers
+and width-adjusted WUA values plotted in these figures. For the included input
+network, `bf_width_model` is `DA+PPT+SLOPE`, `bf_depth_model` is `DA+PPT`, and
+`late_summer_wetted_width_model` is `DA+PPT+SLOPE`. Drainage area is therefore
+an explicit predictor of the supplied channel dimensions. The model calculates
+`WUA(Q) = HSI(Q) × wetted_width(Q)`. WUA rises with channel width and with
+suitability; HSI omits width but retains the influence of predicted depth,
+slope, and D84 on the simulated depth and velocity distributions and on
+substrate suitability. Both metrics average the native simulated water-level
+sequence from near dry to bankfull, not a matched seasonal flow across reaches.
+These diagnostics describe the fitted network and cannot distinguish a
+physical downstream trend from one introduced by the input predictions.
+
+#### Why larger channels score higher on depth
+
+The [original GIFT R hydraulics](https://rdrr.io/github/SGronsdahl/GIFT/src/R/AvgHydraulics.R)
+uses bankfull width `wb` and mean bankfull depth `db` to construct a cross
+section. With no measured maximum depth, its executable formula is
+`b = (wb / db) / 100` for shape and `dmax = db / (1 - b)` for maximum depth.
+For each of 981 water levels from 2% of `dmax` above the bed to bankfull, it
+computes wetted area `Ai`, width `Wi`, and mean depth `di = Ai / Wi`. The Python
+port caps `b` at 0.7 if necessary. The [original R habitat model](https://rdrr.io/github/SGronsdahl/GIFT/src/R/Habitat.R)
+multiplies a relative depth distribution by `di` at each level and calculates
+the weighted average of the depth curve's suitability scores. Greater `db`
+therefore shifts simulated absolute depths toward higher values. For the
+included channels, most modeled depths lie below the rising part of the
+general salmonid curve, whose peak is near 0.65 m, so larger depths tend to
+raise `d.suit_mean`. Width has no direct factor in depth suitability: at a
+fixed `db`, it changes `b` and the cross-sectional shape, so its effect can
+be smaller and nonmonotonic. The model multiplies by `Wi` only when forming WUA.
+
+The additional `salmonid_general_sensitivity` group reads its
+`_depth.csv`, `_velocity.csv`, and `_substrate.csv` directly from
+`examples/Inputs`. To run that scenario for the selected reaches in
+`examples/stream_network.py`, set all three `*_CURVE_PATH` variables to the
+corresponding `salmonid_general_sensitivity_*.csv` files. The depth and
+velocity CSVs contain the `salmonid` / `general` entries from the
+[Ptolemy curves bundled with GIFT](https://sgronsdahl.github.io/GIFT/guidance.html):
+depth suitability peaks at 0.65 m and remains about 0.85 at 2 m; velocity
+peaks at 0.30 m/s and reaches zero at 0.70 m/s. The original material does not
+include a matching general-salmonid substrate entry. This example pairs those
+two curves with the generic juvenile and resident adult salmon/trout **rearing**
+substrate scores from [WDFW/Ecology (2022), Table 1](https://apps.ecology.wa.gov/publications/documents/0411007.pdf):
+0.10 for fines, sand, and small gravel; 0.30 for medium and large gravel;
+0.50 for small cobble; 0.70 for large cobble; and 1.00 for boulders. Those
+field substrate and cover categories are approximated using predicted D84
+as a single representative grain size. This cannot identify bedrock or cover
+and is a **mixed-source sensitivity scenario**, not a unified species and
+life-stage criterion. The original R model can instead average a measured
+grain-size distribution across classes.
+
+`general_salmonid_input_curves.png` plots all three criteria. The controlled
+`general_salmonid_geometry_sensitivity.png` and corresponding CSV change only
+bankfull width or only bankfull depth from the sample's 10th to 90th percentile,
+holding slope, D84, and other dimensions at their medians. In this comparison,
+increasing depth from 0.184 to 0.478 m raises mean depth suitability from 0.172
+to 0.439; increasing width from 2.50 to 15.10 m at fixed depth changes it from
+0.260 to 0.290 (with a slight intermediate dip). Under fixed slope and D84,
+velocity suitability *falls* from 0.342 to 0.151 along the depth change, which
+shows why a depth-only improvement does not guarantee an equal HSI improvement.
+Across the actual 727 reaches, general-salmonid `HSI_mean` has Spearman
+`rho = 0.870` with drainage area, while `WUA_mean` has `rho = 0.946`.
+From the smallest to largest drainage-area quintile, median simulated depth
+increases from 0.092 to 0.228 m and depth suitability from 0.175 to 0.425.
+These are native water-level averages, not habitat at the same discharge or
+observed fish use; a wider channel at a common flow could behave differently.
 
 ### Hydraulic results
 
